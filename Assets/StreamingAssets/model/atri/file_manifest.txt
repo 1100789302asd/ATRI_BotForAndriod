@@ -1,0 +1,146 @@
+﻿config/chat_history.txt
+config/netease_cookie.json
+config/prefab_audio/当然，我可是高性能的.wav
+config/prefab_audio/好久不见，你长大了呢.wav
+config/prefab_audio/好呀，只要和夏生先生一起，无论是怎样的冒险我都没问题的，因为我最喜欢夏生先生了.wav
+config/prefab_audio/你要拯救的世界，也包括我吗.wav
+config/prefab_audio/虽然有些羞耻,但我喜欢夏生先生哦.wav
+config/prefab_audio/夏生先生，欢迎回来.wav
+config/prefab_audio/夏生先生明明那么厉害，有时候却很爱撒娇呢，但是，这样的夏生先生也很可爱呢.wav
+config/prefab_audio/最喜欢和夏生先生在一起了.wav
+config/prompt.txt
+config/server_config.json
+img/heart0.png
+img/heart1.png
+img/heart2.png
+img/loading.gif
+img/pull.png
+img/setting.png
+init_musics/angry-松本文紀 - ハレーション.mp3
+init_musics/happy-神前暁 - 「戦場ヶ原、蕩れ」.mp3
+init_musics/happy-松本文紀 - 暖かな時間.mp3
+init_musics/normal-I've - 陽だまりの小部屋.mp3
+init_musics/normal-まらしぃ - 歌に形はないけれど.mp3
+init_musics/normal-出羽良彰 - Cry for the moon.mp3
+init_musics/normal-松本文紀 - 夢の歩みを見上げて.mp3
+init_musics/normal-松本文紀 - 親愛なるあの日々へ.mp3
+init_musics/normal-志倉千代丸 - 雨のち想い出.mp3
+init_musics/sorrow-上松範康(Elements Garden) - 溢爱.mp3
+init_musics/sorrow-藤井稿太郎 - Nostalgia.mp3
+init_musics/sorrow-藤井稿太郎 - Sacralet.mp3
+model_data/.vscode/settings.json
+model_data/angry.exp3.asset
+model_data/angry.exp3.json
+model_data/atri_8.4096/texture_00.png
+model_data/atri_8.4096/texture_01.png
+model_data/atri_8.asset
+model_data/atri_8.cdi3.json
+model_data/atri_8.controller
+model_data/atri_8.moc3
+model_data/atri_8.model3.json
+model_data/atri_8.NDIToArtMesh.json
+model_data/atri_8.physics3.json
+model_data/atri_8.prefab
+model_data/atri_8.vtube.json
+model_data/atri_8.xyplugin.json
+model_data/dec-l.anim
+model_data/dec-l.fade.asset
+model_data/dec-l.motion3.json
+model_data/dec-r.anim
+model_data/dec-r.fade.asset
+model_data/dec-r.motion3.json
+model_data/expression1.exp3.asset
+model_data/expression1.exp3.json
+model_data/expression10.exp3.asset
+model_data/expression10.exp3.json
+model_data/expression11.exp3.asset
+model_data/expression11.exp3.json
+model_data/expression12.exp3.asset
+model_data/expression12.exp3.json
+model_data/expression13.exp3.asset
+model_data/expression13.exp3.json
+model_data/expression14.exp3.asset
+model_data/expression14.exp3.json
+model_data/expression15.exp3.asset
+model_data/expression15.exp3.json
+model_data/expression16.exp3.asset
+model_data/expression16.exp3.json
+model_data/expression17.exp3.asset
+model_data/expression17.exp3.json
+model_data/expression18.exp3.asset
+model_data/expression18.exp3.json
+model_data/expression2.exp3.asset
+model_data/expression2.exp3.json
+model_data/expression3.exp3.asset
+model_data/expression3.exp3.json
+model_data/expression4.exp3.asset
+model_data/expression4.exp3.json
+model_data/expression5.exp3.asset
+model_data/expression5.exp3.json
+model_data/expression6.exp3.asset
+model_data/expression6.exp3.json
+model_data/expression7.exp3.asset
+model_data/expression7.exp3.json
+model_data/expression8.exp3.asset
+model_data/expression8.exp3.json
+model_data/expression9.exp3.asset
+model_data/expression9.exp3.json
+model_data/expressions/expression1.exp3.asset
+model_data/expressions/expression1.exp3.json
+model_data/expressions/expression10.exp3.asset
+model_data/expressions/expression10.exp3.json
+model_data/expressions/expression11.exp3.asset
+model_data/expressions/expression11.exp3.json
+model_data/expressions/expression12.exp3.asset
+model_data/expressions/expression12.exp3.json
+model_data/expressions/expression13.exp3.asset
+model_data/expressions/expression13.exp3.json
+model_data/expressions/expression14.exp3.asset
+model_data/expressions/expression14.exp3.json
+model_data/expressions/expression15.exp3.asset
+model_data/expressions/expression15.exp3.json
+model_data/expressions/expression16.exp3.asset
+model_data/expressions/expression16.exp3.json
+model_data/expressions/expression2.exp3.asset
+model_data/expressions/expression2.exp3.json
+model_data/expressions/expression3.exp3.asset
+model_data/expressions/expression3.exp3.json
+model_data/expressions/expression4.exp3.asset
+model_data/expressions/expression4.exp3.json
+model_data/expressions/expression5.exp3.asset
+model_data/expressions/expression5.exp3.json
+model_data/expressions/expression6.exp3.asset
+model_data/expressions/expression6.exp3.json
+model_data/expressions/expression7.exp3.asset
+model_data/expressions/expression7.exp3.json
+model_data/expressions/expression8.exp3.asset
+model_data/expressions/expression8.exp3.json
+model_data/expressions/expression9.exp3.asset
+model_data/expressions/expression9.exp3.json
+model_data/expressions/开心.exp3 - 副本.json
+model_data/expressions/开心.exp3.asset
+model_data/expressions/开心.exp3.json
+model_data/expressions/伤心.exp3.asset
+model_data/expressions/伤心.exp3.json
+model_data/expressions/委屈.exp3.asset
+model_data/expressions/委屈.exp3.json
+model_data/icon.jpg
+model_data/items_pinned_to_model.json
+model_data/model.anim
+model_data/model.fade.asset
+model_data/model.motion3.json
+model_data/model_data.expressionList.asset
+model_data/model_data.fadeMotionList.asset
+model_data/motions/dec-l.anim
+model_data/motions/dec-l.fade.asset
+model_data/motions/dec-l.motion3.json
+model_data/motions/dec-r.anim
+model_data/motions/dec-r.fade.asset
+model_data/motions/dec-r.motion3.json
+model_data/motions/model.anim
+model_data/motions/model.fade.asset
+model_data/motions/model.motion3.json
+model_data/normal.exp3.asset
+model_data/normal.exp3.json
+model_data/shy.exp3.asset
+model_data/shy.exp3.json

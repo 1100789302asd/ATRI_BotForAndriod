@@ -1,0 +1,154 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "atri_8.moc3",
+		"Textures": [
+			"atri_8.4096/texture_00.png",
+			"atri_8.4096/texture_01.png"
+		],
+		"Physics": "atri_8.physics3.json",
+		"DisplayInfo": "atri_8.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "脸红",
+				"File": "expressions/expression1.exp3.json"
+			},
+			{
+				"Name": "失去高光",
+				"File": "expressions/expression2.exp3.json"
+			},
+			{
+				"Name": "换连衣裙",
+				"File": "expressions/连衣裙.exp3.json"
+			},
+			{
+				"Name": "换泳装",
+				"File": "expressions/泳装.exp3.json"
+			},
+			{
+				"Name": "换凉鞋",
+				"File": "expressions/expression5.exp3.json"
+			},
+			{
+				"Name": "换乐福鞋",
+				"File": "expressions/expression6.exp3.json"
+			},
+			{
+				"Name": "赌气",
+				"File": "expressions/白眼.exp3.json"
+			},
+			{
+				"Name": "消失屏幕",
+				"File": "expressions/expression8.exp3.json"
+			},
+			{
+				"Name": "血衣",
+				"File": "expressions/expression9.exp3.json"
+			},
+			{
+				"Name": "小鸟",
+				"File": "expressions/小鸟.exp3.json"
+			},
+			{
+				"Name": "螃蟹",
+				"File": "expressions/螃蟹.exp3.json"
+			},
+			{
+				"Name": "拒绝抱枕",
+				"File": "expressions/no.exp3.json"
+			},
+			{
+				"Name": "同意抱枕",
+				"File": "expressions/yes.exp3.json"
+			},
+			{
+				"Name": "换灯笼裤",
+				"File": "expressions/灯笼裤.exp3.json"
+			},
+			{
+				"Name": "画面暗淡",
+				"File": "expressions/expression15.exp3.json"
+			},
+			{
+				"Name": "彻底坏掉",
+				"File": "expressions/彻底坏掉.exp3.json"
+			},
+			{
+				"Name": "委屈想哭",
+				"File": "expressions/委屈.exp3.json"
+			},
+			{
+				"Name": "sad",
+				"File": "expressions/伤心.exp3.json"
+			},
+			{
+				"Name": "得意",
+				"File": "expressions/得意.exp3.json"
+			},
+			{
+				"Name": "shy",
+				"File": "expressions/shy.exp3.json"
+			},
+			{
+				"Name": "normal",
+				"File": "expressions/normal.exp3.json"
+			},
+			{
+				"Name": "confuse",
+				"File": "confuse.exp3.json"
+			},
+			{
+				"Name": "happy",
+				"File": "expressions/happy.exp3.json"
+			}
+		],
+		"Motions": {
+			"decl": [
+				{
+					"File": "motions/dec-l.motion3.json",
+					"FadeInTime": 0.5,
+					"FadeOutTime": 0.5
+				}
+			],
+			"decr": [
+				{
+					"File": "motions/dec-r.motion3.json",
+					"FadeInTime": 0.5,
+					"FadeOutTime": 0.5
+				}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthForm",
+				"ParamMouthOpenY"
+			]
+		}
+	],
+	"HitAreas": [
+		{
+			"Id": "HitArea",
+			"Name": ""
+		},
+		{
+			"Id": "HitArea2",
+			"Name": ""
+		},
+		{
+			"Id": "HitArea3",
+			"Name": ""
+		}
+	]
+}

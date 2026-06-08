@@ -1,0 +1,70 @@
+# Unity generated folders
+/Library/
+/Temp/
+/Obj/
+/Build/
+/Builds/
+/Logs/
+/UserSettings/
+/.utmp/
+
+# Unity generated files
+*.csproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Unity crash and memory dumps
+sysinfo.txt
+*.stackdump
+
+# IDE/editor settings
+/.vscode/
+/.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Build/package outputs
+*.apk
+*.aab
+*.unitypackage
+*.app
+*.exe
+*.zip
+*.7z
+*.rar
+
+# Sensitive runtime data
+**/netease_cookie.json
+**/cookie.json
+**/*cookie*.json
+**/chat_history.txt
+**/state.json
+**/credentials.json
+**/*.keystore
+**/*.jks
+**/*.p12
+**/*.pfx
+**/*.pem
+**/*.key
+**/.env
+**/.env.*
+
+# Local debug/runtime output
+**/DesktopPetRenderDebug.txt
+**/*.log
