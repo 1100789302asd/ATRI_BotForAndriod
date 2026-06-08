@@ -942,6 +942,8 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
     {
         public string socketServerUrl = "http://127.0.0.1:5000";
         public string neteaseApiBaseUrl = "http://127.0.0.1:3000";
+        public string neteaseCellphone = "";
+        public string neteaseCountryCode = "86";
     }
 
     [SerializeField] private string configPath = "config/server_config.json";
@@ -959,6 +961,16 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
     public string NeteaseApiBaseUrl
     {
         get { return data.neteaseApiBaseUrl; }
+    }
+
+    public string NeteaseCellphone
+    {
+        get { return data.neteaseCellphone; }
+    }
+
+    public string NeteaseCountryCode
+    {
+        get { return data.neteaseCountryCode; }
     }
 
     public bool IsLoaded
@@ -1029,6 +1041,19 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
         Save();
     }
 
+    public void SetNeteaseCellphone(string value)
+    {
+        data.neteaseCellphone = (value ?? "").Trim();
+        Save();
+    }
+
+    public void SetNeteaseCountryCode(string value)
+    {
+        value = (value ?? "").Trim();
+        data.neteaseCountryCode = string.IsNullOrWhiteSpace(value) ? "86" : value;
+        Save();
+    }
+
     public void Save()
     {
         if (string.IsNullOrWhiteSpace(resolvedConfigPath))
@@ -1058,6 +1083,8 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
     {
         data.socketServerUrl = NormalizeUrl(data.socketServerUrl, "http://127.0.0.1:5000");
         data.neteaseApiBaseUrl = NormalizeUrl(data.neteaseApiBaseUrl, "http://127.0.0.1:3000");
+        data.neteaseCellphone = (data.neteaseCellphone ?? "").Trim();
+        data.neteaseCountryCode = string.IsNullOrWhiteSpace(data.neteaseCountryCode) ? "86" : data.neteaseCountryCode.Trim();
     }
 
     private static string NormalizeUrl(string value, string fallback)

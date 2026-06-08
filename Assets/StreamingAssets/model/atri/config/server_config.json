@@ -1,4 +1,6 @@
 {
     "socketServerUrl": "http://192.168.1.7:5000",
-    "neteaseApiBaseUrl": "https://ncm-api.prod.gbclstudio.cn"
+    "neteaseApiBaseUrl": "https://ncm-api.prod.gbclstudio.cn",
+    "neteaseCellphone": "",
+    "neteaseCountryCode": "86"
 }
