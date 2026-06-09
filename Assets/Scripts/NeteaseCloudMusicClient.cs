@@ -51,7 +51,7 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
     [SerializeField] private bool autoPlayWhenMusicEnds = true;
     [SerializeField] private AudioType downloadedAudioType = AudioType.MPEG;
     [SerializeField] private string tempMusicFileName = "desktop_pet_netease_music.mp3";
-    [SerializeField] private bool preferHttpsSongUrl;
+    [SerializeField] private bool preferHttpsSongUrl = true;
     [SerializeField] private bool retryApiWithCertificateBypass = true;
     [SerializeField] private float resumeAutoNextDelay = 2f;
     [SerializeField] private float nativeCompletionPollInterval = 2f;
@@ -95,6 +95,8 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
     private bool isSubmittingCaptcha;
     private bool isChangingMusic;
     private bool nativeMusicPlaying;
+    private bool useApiCertificateCompatibility;
+    private bool certificateCompatibilityNoticeShown;
     private string nowMusicName = "";
     private float ignoreAutoNextUntil;
     private float nextNativeCompletionPollAt;
@@ -473,7 +475,7 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
                    "&captcha=" + UnityWebRequest.EscapeURL(captcha);
         if (!string.IsNullOrWhiteSpace(loginCountryCode) && !string.Equals(loginCountryCode, "86", StringComparison.Ordinal))
         {
-            path += "&countrycode=" + UnityWebRequest.EscapeURL(loginCountryCode);
+            path += "&ctcode=" + UnityWebRequest.EscapeURL(loginCountryCode);
         }
 
         var loggedIn = false;
@@ -632,7 +634,18 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
 
         using (var request = UnityWebRequest.Get(songUrl))
         {
-            yield return request.SendWebRequest();
+            UnityWebRequestAsyncOperation operation;
+            try
+            {
+                operation = request.SendWebRequest();
+            }
+            catch (InvalidOperationException exc)
+            {
+                NotifyStatus("Netease music download blocked by Unity connection policy: " + exc.Message);
+                yield break;
+            }
+
+            yield return operation;
             if (request.result != UnityWebRequest.Result.Success)
             {
                 NotifyStatus("Netease music download failed: " + request.error);
@@ -754,33 +767,42 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
     private IEnumerator RequestJsonCore(string pathAndQuery, bool includeCookie, Action<JObject> onSuccess)
     {
         var url = BuildApiUrl(pathAndQuery);
+        var safePath = RedactSensitiveQuery(pathAndQuery);
         UnityWebRequest request = null;
-        yield return SendApiRequest(url, includeCookie, false, completedRequest => request = completedRequest);
+        yield return SendApiRequest(url, includeCookie, useApiCertificateCompatibility, completedRequest => request = completedRequest);
 
         if (request == null)
         {
-            NotifyStatus("Netease request failed: " + pathAndQuery + " request not created");
+            NotifyStatus("Netease request failed: " + safePath + " request not created");
             yield break;
         }
 
         var shouldRetryCertificate = request.result != UnityWebRequest.Result.Success &&
                                      retryApiWithCertificateBypass &&
+                                     !useApiCertificateCompatibility &&
                                      IsCertificateError(request.error);
 
         if (shouldRetryCertificate)
         {
-            NotifyCertificateHintIfNeeded(request.error);
+            useApiCertificateCompatibility = true;
+            NotifyCertificateHintIfNeeded(request.error, true);
             request.Dispose();
             request = null;
 
-            NotifyStatus("Netease API certificate verification failed, retrying with compatibility mode: " + pathAndQuery);
+            NotifyStatus("Netease API certificate verification failed, retrying with compatibility mode: " + safePath);
             yield return SendApiRequest(url, includeCookie, true, completedRequest => request = completedRequest);
+        }
+
+        if (request == null)
+        {
+            NotifyStatus("Netease request failed: " + safePath + " compatibility request not created");
+            yield break;
         }
 
         if (request.result != UnityWebRequest.Result.Success)
         {
-            NotifyCertificateHintIfNeeded(request.error);
-            NotifyStatus("Netease request failed: " + pathAndQuery + " " + request.error);
+            NotifyCertificateHintIfNeeded(request.error, false);
+            NotifyStatus("Netease request failed: " + safePath + " " + BuildRequestErrorDetail(request));
             request.Dispose();
             yield break;
         }
@@ -792,7 +814,7 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         }
         catch (Exception exc)
         {
-            NotifyStatus("Netease json parse failed: " + pathAndQuery + " " + exc.Message);
+            NotifyStatus("Netease json parse failed: " + safePath + " " + exc.Message);
         }
         finally
         {
@@ -857,6 +879,100 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         }
 
         return baseUrl + "/" + pathAndQuery;
+    }
+
+    private static string BuildRequestErrorDetail(UnityWebRequest request)
+    {
+        var message = request.error ?? "";
+        var body = request.downloadHandler != null ? request.downloadHandler.text : "";
+        var summary = SummarizeResponseBody(body);
+        return string.IsNullOrWhiteSpace(summary) ? message : message + " response=" + summary;
+    }
+
+    private static string SummarizeResponseBody(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return "";
+        }
+
+        body = body.Trim();
+        try
+        {
+            var json = JObject.Parse(body);
+            var code = json.SelectToken("code")?.ToString() ??
+                       json.SelectToken("body.code")?.ToString() ??
+                       json.SelectToken("data.code")?.ToString();
+            var message = json.SelectToken("message")?.ToString() ??
+                          json.SelectToken("msg")?.ToString() ??
+                          json.SelectToken("body.message")?.ToString() ??
+                          json.SelectToken("body.msg")?.ToString() ??
+                          json.SelectToken("data.message")?.ToString() ??
+                          json.SelectToken("data.msg")?.ToString();
+            var parts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(code))
+            {
+                parts.Add("code=" + code);
+            }
+
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                parts.Add("message=" + message);
+            }
+
+            if (parts.Count > 0)
+            {
+                return string.Join(", ", parts);
+            }
+        }
+        catch
+        {
+        }
+
+        body = body.Replace("\r", " ").Replace("\n", " ");
+        return body.Length <= 200 ? body : body.Substring(0, 200) + "...";
+    }
+
+    private static string RedactSensitiveQuery(string pathAndQuery)
+    {
+        if (string.IsNullOrWhiteSpace(pathAndQuery))
+        {
+            return pathAndQuery;
+        }
+
+        var questionIndex = pathAndQuery.IndexOf('?');
+        if (questionIndex < 0)
+        {
+            return pathAndQuery;
+        }
+
+        var path = pathAndQuery.Substring(0, questionIndex);
+        var query = pathAndQuery.Substring(questionIndex + 1);
+        var parameters = query.Split('&');
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var parameter = parameters[i];
+            var equalIndex = parameter.IndexOf('=');
+            if (equalIndex <= 0)
+            {
+                continue;
+            }
+
+            var key = parameter.Substring(0, equalIndex);
+            if (IsSensitiveQueryKey(key))
+            {
+                parameters[i] = key + "=***";
+            }
+        }
+
+        return path + "?" + string.Join("&", parameters);
+    }
+
+    private static bool IsSensitiveQueryKey(string key)
+    {
+        return string.Equals(key, "phone", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(key, "captcha", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(key, "password", StringComparison.OrdinalIgnoreCase);
     }
 
     private IEnumerator LoadServerConfigThenInitialize()
@@ -1227,13 +1343,25 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         LoginFailed?.Invoke(message);
     }
 
-    private void NotifyCertificateHintIfNeeded(string error)
+    private void NotifyCertificateHintIfNeeded(string error, bool willRetry)
     {
-        if (!IsCertificateError(error))
+        if (!IsCertificateError(error) || certificateCompatibilityNoticeShown)
         {
             return;
         }
 
-        NotifyStatus("Netease HTTPS certificate verification failed. Retrying API requests with certificate compatibility mode when enabled.");
+        certificateCompatibilityNoticeShown = true;
+        if (willRetry)
+        {
+            NotifyStatus("Netease HTTPS certificate verification failed. Retrying API requests with certificate compatibility mode.");
+        }
+        else if (retryApiWithCertificateBypass)
+        {
+            NotifyStatus("Netease HTTPS certificate verification failed. Certificate compatibility mode did not resolve the request.");
+        }
+        else
+        {
+            NotifyStatus("Netease HTTPS certificate verification failed. Enable certificate compatibility mode or use an HTTP/local API endpoint.");
+        }
     }
 }
