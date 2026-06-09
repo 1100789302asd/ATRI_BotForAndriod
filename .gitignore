@@ -50,10 +50,10 @@ Desktop.ini
 *.rar
 
 # Sensitive runtime data
-**/netease_cookie.json
-**/cookie.json
+
+
 **/*cookie*.json
-**/chat_history.txt
+
 **/state.json
 **/credentials.json
 **/*.keystore
