@@ -11,6 +11,7 @@ public class DropDownCtrl : MonoBehaviour
         originPos=uiContent.transform.position;
         Flyaway();
     }
+    //
     public void Flyaway()
     {
         uiContent.transform.position=new Vector3(-1000,0,0);
