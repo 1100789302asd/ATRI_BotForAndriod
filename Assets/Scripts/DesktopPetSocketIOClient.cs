@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.IO;
+using System.Threading;
 using SocketIOClient;
 using SocketIOClient.Newtonsoft.Json;
 using SocketIOClient.Transport;
@@ -19,6 +20,9 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     {
         public VoiceProduceData data;
         public string username;
+        public string model_name;
+        public string pet_id;
+        public string special;
     }
 
     [Serializable]
@@ -33,6 +37,7 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
         public float top_p = 1f;
         public float temperature = 1f;
         public string text_split_method = "cut1";
+        public string model_name;
         public string pet_id;
         public string return_format;
     }
@@ -61,10 +66,11 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     [SerializeField] private DesktopPetMigratedController petController;
     [SerializeField] private string username = "";
     [SerializeField] private string petId = "";
+    [SerializeField] private string modelName = "gpt";
     [SerializeField] private string voiceProduceEventName = "voice_produce";
     [SerializeField] private string refAudioSuffix = ".wav";
-    [SerializeField] private string textLanguage = "\u65e5\u82f1\u6df7\u5408";
-    [SerializeField] private string promptLanguage = "\u65e5\u82f1\u6df7\u5408";
+    [SerializeField] private string textLanguage = "ja";
+    [SerializeField] private string promptLanguage = "ja";
     [SerializeField] private float voiceRequestTimeoutSeconds = 75f;
 
     [Header("Debug")]
@@ -89,6 +95,11 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     public bool IsConnected
     {
         get { return socket != null && socket.Connected; }
+    }
+
+    public string ModelName
+    {
+        get { return modelName; }
     }
 
     private void Reset()
@@ -203,6 +214,28 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
         }
     }
 
+    public void SetModelName(string value)
+    {
+        value = (value ?? "").Trim().ToLowerInvariant();
+        modelName = string.IsNullOrWhiteSpace(value) ? "gpt" : value;
+        Log("AI model switched to: " + modelName);
+    }
+
+    public void UseGptModel()
+    {
+        SetModelName("gpt");
+    }
+
+    public void UseGeminiModel()
+    {
+        SetModelName("gemini");
+    }
+
+    public void SetGeminiModelEnabled(bool enabled)
+    {
+        SetModelName(enabled ? "gemini" : "gpt");
+    }
+
     public void Disconnect()
     {
         socket?.Disconnect();
@@ -219,6 +252,7 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
 
         chatBridge.SocketAnswerRequested.AddListener(SendSocketRequest);
         chatBridge.VoiceSynthesisRequested.AddListener(SendVoiceSynthesisRequest);
+        chatBridge.DialogueHistoryRequested.AddListener(SendDialogueHistoryRequest);
         bridgeBound = true;
     }
 
@@ -231,7 +265,190 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
 
         chatBridge.SocketAnswerRequested.RemoveListener(SendSocketRequest);
         chatBridge.VoiceSynthesisRequested.RemoveListener(SendVoiceSynthesisRequest);
+        chatBridge.DialogueHistoryRequested.RemoveListener(SendDialogueHistoryRequest);
         bridgeBound = false;
+    }
+
+    public void SendDialogueHistoryRequest(string eventName, string payloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(eventName))
+        {
+            ReportError("Dialogue history Socket.IO event name is empty.");
+            return;
+        }
+
+        var payload = ParsePayloadJson(payloadJson, out var payloadError);
+        if (payload == null)
+        {
+            ReportError(payloadError);
+            return;
+        }
+
+        if (socket == null || !socket.Connected)
+        {
+            Connect();
+            pendingSocketActions.Enqueue(() => EmitDialogueHistoryRequest(eventName, payloadJson, payload));
+            Log("Socket.IO dialogue history request queued until connected: " + eventName);
+            return;
+        }
+
+        EmitDialogueHistoryRequest(eventName, payloadJson, payload);
+    }
+
+    public bool SendDialogueHistoryRequestBlocking(string eventName, string payloadJson, float timeoutSeconds, out string error)
+    {
+        error = "";
+        if (string.IsNullOrWhiteSpace(eventName))
+        {
+            error = "Dialogue history Socket.IO event name is empty.";
+            return false;
+        }
+
+        var payload = ParsePayloadJson(payloadJson, out var payloadError);
+        if (payload == null)
+        {
+            error = payloadError;
+            return false;
+        }
+        var timeoutMs = Mathf.Max(1, Mathf.RoundToInt(timeoutSeconds * 1000f));
+
+        if (socket == null || !socket.Connected)
+        {
+            error = "Socket.IO client is not connected.";
+            return false;
+        }
+
+        var completed = new ManualResetEventSlim(false);
+        var ackJson = "";
+        var ackError = "";
+
+        try
+        {
+            socket.Emit(eventName, response =>
+            {
+                if (TryGetFirstRawJson(response, out var rawJson, out var rawError))
+                {
+                    ackJson = rawJson;
+                }
+                else
+                {
+                    ackError = rawError;
+                }
+
+                completed.Set();
+            }, payload);
+        }
+        catch (Exception exc)
+        {
+            error = exc.Message;
+            completed.Dispose();
+            return false;
+        }
+
+        if (!completed.Wait(timeoutMs))
+        {
+            error = "Socket.IO " + eventName + " timed out.";
+            completed.Dispose();
+            return false;
+        }
+
+        completed.Dispose();
+        if (!string.IsNullOrWhiteSpace(ackError))
+        {
+            error = ackError;
+            return false;
+        }
+
+        if (eventName.IndexOf("save", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            if (!DesktopPetChatBridge.IsDialogueHistorySuccessResponse(ackJson, out error))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public bool SendSocketRequestBlocking(string eventName, string payloadJson, float timeoutSeconds, out string answerJson, out string error)
+    {
+        answerJson = "";
+        error = "";
+        if (string.IsNullOrWhiteSpace(eventName))
+        {
+            error = "Socket.IO event name is empty.";
+            return false;
+        }
+
+        var payload = ParsePayloadJson(payloadJson, out var payloadError);
+        if (payload == null)
+        {
+            error = payloadError;
+            return false;
+        }
+        var timeoutMs = Mathf.Max(1, Mathf.RoundToInt(timeoutSeconds * 1000f));
+
+        if (socket == null || !socket.Connected)
+        {
+            error = "Socket.IO client is not connected.";
+            return false;
+        }
+
+        var completed = new ManualResetEventSlim(false);
+        var ackJson = "";
+        var ackError = "";
+
+        try
+        {
+            socket.Emit(eventName, response =>
+            {
+                if (TryGetFirstRawJson(response, out var rawJson, out var rawError))
+                {
+                    ackJson = rawJson;
+                }
+                else
+                {
+                    ackError = rawError;
+                }
+
+                completed.Set();
+            }, payload);
+        }
+        catch (Exception exc)
+        {
+            error = exc.Message;
+            completed.Dispose();
+            return false;
+        }
+
+        if (!completed.Wait(timeoutMs))
+        {
+            error = "Socket.IO " + eventName + " timed out.";
+            completed.Dispose();
+            return false;
+        }
+
+        completed.Dispose();
+        if (!string.IsNullOrWhiteSpace(ackError))
+        {
+            error = ackError;
+            return false;
+        }
+
+        answerJson = ackJson;
+        return true;
+    }
+
+    private void EmitDialogueHistoryRequest(string eventName, string payloadJson, object payload)
+    {
+        if (socket == null || !socket.Connected)
+        {
+            ReportError("Socket.IO client is not connected; cannot request dialogue history.");
+            return;
+        }
+
+        Log("Socket.IO emit: " + eventName + " " + payloadJson);
+        socket.Emit(eventName, response => HandleDialogueHistoryAck(eventName, response), payload);
     }
 
     public void SendSocketRequest(string eventName, string payloadJson)
@@ -242,7 +459,12 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
             return;
         }
 
-        var payload = JsonUtility.FromJson<DesktopPetChatBridge.SocketCallPayload>(payloadJson);
+        var payload = ParsePayloadJson(payloadJson, out var payloadError);
+        if (payload == null)
+        {
+            ReportError(payloadError);
+            return;
+        }
         var requestId = BeginSocketRequestTimeout(eventName);
 
         if (socket == null || !socket.Connected)
@@ -262,7 +484,7 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
         EmitSocketRequest(eventName, payloadJson, payload, requestId);
     }
 
-    private void EmitSocketRequest(string eventName, string payloadJson, DesktopPetChatBridge.SocketCallPayload payload, int requestId)
+    private void EmitSocketRequest(string eventName, string payloadJson, object payload, int requestId)
     {
         if (socket == null || !socket.Connected)
         {
@@ -292,6 +514,9 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
         var payload = new VoiceProduceSocketPayload
         {
             username = username,
+            model_name = modelName,
+            pet_id = petId,
+            special = "",
             data = new VoiceProduceData
             {
                 text = jaText,
@@ -299,6 +524,7 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
                 ref_audio_name = BuildRefAudioName(mood),
                 prompt_text = "",
                 prompt_lang = promptLanguage,
+                model_name = petId,
                 pet_id = petId,
                 return_format = "wav"
             }
@@ -373,6 +599,86 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
 
             chatBridge.ReceiveSocketAnswerJson(answerJson);
         });
+    }
+
+    private void HandleDialogueHistoryAck(string eventName, SocketIOResponse response)
+    {
+        if (!TryGetFirstRawJson(response, out var rawJson, out var error))
+        {
+            EnqueueMain(() => ReportDialogueHistoryAckError(eventName, error));
+            return;
+        }
+
+        Log("Socket.IO dialogue history ack: " + rawJson);
+        EnqueueMain(() =>
+        {
+            if (chatBridge == null)
+            {
+                ReportError("Chat bridge is missing; cannot forward dialogue history ack.");
+                return;
+            }
+
+            if (IsWriteHistoryEvent(eventName))
+            {
+                if (eventName.IndexOf("summary", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    chatBridge.ReceiveSaveSummaryHistoryResultJson(rawJson);
+                }
+                else
+                {
+                    chatBridge.ReceiveSaveDialogueHistoryResultJson(rawJson);
+                }
+            }
+            else
+            {
+                if (eventName.IndexOf("summary", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    chatBridge.ReceiveSummaryHistoryResultJson(rawJson);
+                }
+                else
+                {
+                    chatBridge.ReceiveDialogueHistoryResultJson(rawJson);
+                }
+            }
+        });
+    }
+
+    private void ReportDialogueHistoryAckError(string eventName, string error)
+    {
+        if (chatBridge == null)
+        {
+            ReportError(error);
+            return;
+        }
+
+        if (IsWriteHistoryEvent(eventName))
+        {
+            if (eventName.IndexOf("summary", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                chatBridge.ReceiveSaveSummaryHistoryResult(error);
+            }
+            else
+            {
+                chatBridge.ReceiveSaveDialogueHistoryResult(error);
+            }
+        }
+        else
+        {
+            if (eventName.IndexOf("summary", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                chatBridge.ReceiveSummaryHistoryResult("", error);
+            }
+            else
+            {
+                chatBridge.ReceiveDialogueHistoryResult("", error);
+            }
+        }
+    }
+
+    private static bool IsWriteHistoryEvent(string eventName)
+    {
+        return eventName.IndexOf("save", StringComparison.OrdinalIgnoreCase) >= 0 ||
+               eventName.IndexOf("update", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private void HandleVoiceSynthesisAck(int requestId, SocketIOResponse response, string jaText, string mood)
@@ -689,6 +995,26 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     private static bool TryExtractVoiceBytes(SocketIOResponse response, out byte[] wavBytes, out string error)
     {
         return TryExtractBinaryBytes(response, "voice_produce", out wavBytes, out error);
+    }
+
+    private static object ParsePayloadJson(string payloadJson, out string error)
+    {
+        error = "";
+        if (string.IsNullOrWhiteSpace(payloadJson))
+        {
+            error = "Socket.IO payload json is empty.";
+            return null;
+        }
+
+        try
+        {
+            return Newtonsoft.Json.Linq.JToken.Parse(payloadJson);
+        }
+        catch (Exception exc)
+        {
+            error = "Socket.IO payload json is invalid: " + exc.Message;
+            return null;
+        }
     }
 
     private static bool TryGetFirstRawJson(SocketIOResponse response, out string rawJson, out string error)

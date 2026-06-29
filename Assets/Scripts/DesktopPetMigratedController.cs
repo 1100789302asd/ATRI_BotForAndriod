@@ -127,6 +127,7 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     private AudioClip trackedMusicClip;
     private float trackedMusicStartedAt = -1f;
     private float trackedMusicLength;
+    private string pendingExpressionName = "";
     private readonly List<string> recentUnityLogs = new List<string>();
 
     public bool HasUpdateController { get; set; }
@@ -268,9 +269,6 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
             StartCoroutine(LogRenderStateAfterDelay());
         }
 
-#if UNITY_ANDROID && !UNITY_EDITOR
-        AndroidFloatingBallBridge.Instance.ShowFloatingBall();
-#endif
     }
 
     private void HandleApplicationBackgroundState(bool isBackground)
@@ -402,6 +400,10 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     public void SetAutoPlayNextMusic(bool enabled)
     {
         autoPlayNextMusic = enabled;
+        if (ShouldRouteMusicToNetease())
+        {
+            neteaseMusicClient.SetAutoPlayWhenMusicEnds(enabled);
+        }
     }
 
     public void ReloadAudioFiles()
@@ -441,6 +443,7 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
 
         musicSource.clip = musicClips[musicIndex];
         musicSource.volume = musicVolume;
+        musicSource.loop = false;
         musicSource.Play();
         TrackMusicPlayback(musicSource.clip);
         musicIndex = (musicIndex + 1) % musicClips.Length;
@@ -526,6 +529,7 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         musicSource.clip = clip;
         musicSource.volume = musicVolume;
         musicSource.ignoreListenerPause = true;
+        musicSource.loop = false;
         externalMusicProviderActive = true;
         musicSource.Play();
         TrackMusicPlayback(musicSource.clip);
@@ -544,8 +548,10 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     public void ReceiveAiAnswer(string answer)
     {
 
-        ParseOldTemplateAnswer(answer, out var cnText, out var mood, out _);
+        ParseOldTemplateAnswer(answer, out var cnText, out var mood, out var expression, out _);
         SetDisplayedText(cnText);
+        pendingExpressionName = expression;
+        SetMood(mood, expression);
        
     }
     public void SetUserSpeakingStatus()
@@ -563,7 +569,9 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
 
         if (!string.IsNullOrEmpty(mood))
         {
-            SetMood(mood);
+            var expression = pendingExpressionName;
+            pendingExpressionName = "";
+            SetMood(mood, expression);
         }
 
         if (voiceSource == null || clip == null)
@@ -604,6 +612,11 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
 
     public void SetMood(string mood)
     {
+        SetMood(mood, "");
+    }
+
+    public void SetMood(string mood, string expressionOverride)
+    {
         mood = NormalizeMoodText(mood);
         if (string.IsNullOrEmpty(mood))
         {
@@ -612,9 +625,11 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
 
         currentMood = mood;
         var profile = GetMoodProfile(mood);
-        if (!ApplyExpression(profile.expressionName))
+        expressionOverride = NormalizeMoodText(expressionOverride);
+        var expressionName = string.IsNullOrWhiteSpace(expressionOverride) ? profile.expressionName : expressionOverride;
+        if (!ApplyExpression(expressionName))
         {
-            Debug.LogWarning("Mood expression not found. mood=\"" + mood + "\", expression=\"" + profile.expressionName + "\".", this);
+            Debug.LogWarning("Mood expression not found. mood=\"" + mood + "\", expression=\"" + expressionName + "\".", this);
         }
 
         MoodChanged?.Invoke(currentMood);
@@ -1621,7 +1636,12 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
 
     private void UpdateMusicLoop()
     {
-        if (!musicEnabled || !autoPlayNextMusic || externalMusicProviderActive || musicSource == null || audioFilesLoading)
+        if (!musicEnabled || !autoPlayNextMusic || musicSource == null || audioFilesLoading)
+        {
+            return;
+        }
+
+        if (externalMusicProviderActive && ShouldRouteMusicToNetease())
         {
             return;
         }
@@ -1774,7 +1794,7 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         return new MoodProfile { mood = mood, expressionName = mood, mouthOpen = 0.6f, shakeRange = 0f };
     }
 
-    private static void ParseOldTemplateAnswer(string answer, out string cnText, out string mood, out string jaText)
+    private static void ParseOldTemplateAnswer(string answer, out string cnText, out string mood, out string expression, out string jaText)
     {
         var parts = answer.Split('|');
         var left = parts.Length > 0 ? parts[0].Trim() : answer.Trim();
@@ -1787,11 +1807,18 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         {
             cnText = left.Substring(0, moodStart).Trim();
             mood = NormalizeMoodText(left.Substring(moodStart + 1, moodEnd - moodStart - 1));
+            expression = NormalizeMoodText(left.Substring(moodEnd + 1));
+            if (string.IsNullOrWhiteSpace(expression))
+            {
+                expression = mood;
+            }
+
             return;
         }
 
         cnText = left.Trim();
         mood = "normal";
+        expression = "normal";
     }
 
     private static string NormalizeMoodText(string mood)

@@ -1,5 +1,5 @@
 ﻿{
-    "socketServerUrl": "http://127.0.0.1:5000",
+    "socketServerUrl": "http://superpai.nat400.top",
     "neteaseApiBaseUrl": "https://ncm-api.prod.gbclstudio.cn",
     "neteaseCellphone": "",
     "neteaseCountryCode": "86"

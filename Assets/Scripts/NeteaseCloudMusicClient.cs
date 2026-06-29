@@ -95,7 +95,7 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
     private bool isSubmittingCaptcha;
     private bool isChangingMusic;
     private bool nativeMusicPlaying;
-    private bool useApiCertificateCompatibility;
+    private bool useApiCertificateCompatibility = true;
     private bool certificateCompatibilityNoticeShown;
     private string nowMusicName = "";
     private float ignoreAutoNextUntil;
@@ -183,7 +183,14 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
 
         if (UsesAndroidNativeMusic())
         {
-            PollNativeMusicCompletion();
+            if (nativeMusicPlaying)
+            {
+                PollNativeMusicCompletion();
+            }
+            else if (petController.IsMusicFinished)
+            {
+                PlayRandomMusic();
+            }
         }
         else if (petController.IsMusicFinished)
         {
@@ -249,6 +256,15 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         if (UsesAndroidNativeMusic())
         {
             androidMusicBridge.Pause();
+        }
+    }
+
+    public void SetAutoPlayWhenMusicEnds(bool enabled)
+    {
+        autoPlayWhenMusicEnds = enabled;
+        if (enabled)
+        {
+            DelayAutoNextCheck();
         }
     }
 
@@ -630,29 +646,15 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         }
 
         var path = Path.Combine(Application.temporaryCachePath, tempMusicFileName);
+        var originalSongUrl = songUrl;
         songUrl = NormalizeSongUrl(songUrl);
 
-        using (var request = UnityWebRequest.Get(songUrl))
+        var downloadError = "";
+        yield return DownloadSongToFile(songUrl, originalSongUrl, path, error => downloadError = error);
+        if (!string.IsNullOrWhiteSpace(downloadError))
         {
-            UnityWebRequestAsyncOperation operation;
-            try
-            {
-                operation = request.SendWebRequest();
-            }
-            catch (InvalidOperationException exc)
-            {
-                NotifyStatus("Netease music download blocked by Unity connection policy: " + exc.Message);
-                yield break;
-            }
-
-            yield return operation;
-            if (request.result != UnityWebRequest.Result.Success)
-            {
-                NotifyStatus("Netease music download failed: " + request.error);
-                yield break;
-            }
-
-            File.WriteAllBytes(path, request.downloadHandler.data);
+            NotifyStatus("Netease music download failed: " + downloadError);
+            yield break;
         }
 
         if (UsesAndroidNativeMusic())
@@ -686,6 +688,76 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         petController.PlayExternalMusic(clip, songName);
         SongChanged?.Invoke(songName);
         NotifyStatus("Netease playing: " + songName);
+    }
+
+    private IEnumerator DownloadSongToFile(string songUrl, string fallbackSongUrl, string path, Action<string> onFailure)
+    {
+        var error = "";
+        yield return DownloadSongToFileCore(songUrl, path, useApiCertificateCompatibility, failed => error = failed);
+
+        if (string.IsNullOrWhiteSpace(error))
+        {
+            yield break;
+        }
+
+        if (IsCertificateError(error) &&
+            !string.IsNullOrWhiteSpace(fallbackSongUrl) &&
+            !string.Equals(songUrl, fallbackSongUrl, StringComparison.OrdinalIgnoreCase))
+        {
+            NotifyStatus("Netease HTTPS music download certificate verification failed, retrying original song URL.");
+
+            error = "";
+            yield return DownloadSongToFileCore(fallbackSongUrl, path, useApiCertificateCompatibility, failed => error = failed);
+            if (string.IsNullOrWhiteSpace(error))
+            {
+                yield break;
+            }
+        }
+
+        if (retryApiWithCertificateBypass && !useApiCertificateCompatibility && IsCertificateError(error))
+        {
+            useApiCertificateCompatibility = true;
+            NotifyCertificateHintIfNeeded(error, true);
+            NotifyStatus("Netease music download certificate verification failed, retrying with compatibility mode.");
+
+            error = "";
+            yield return DownloadSongToFileCore(songUrl, path, true, failed => error = failed);
+        }
+
+        if (!string.IsNullOrWhiteSpace(error))
+        {
+            onFailure?.Invoke(error);
+        }
+    }
+
+    private IEnumerator DownloadSongToFileCore(string songUrl, string path, bool bypassCertificate, Action<string> onFailure)
+    {
+        using var request = UnityWebRequest.Get(songUrl);
+        if (bypassCertificate)
+        {
+            request.certificateHandler = new AcceptAllCertificateHandler();
+            request.disposeCertificateHandlerOnDispose = true;
+        }
+
+        UnityWebRequestAsyncOperation operation;
+        try
+        {
+            operation = request.SendWebRequest();
+        }
+        catch (InvalidOperationException exc)
+        {
+            onFailure?.Invoke("blocked by Unity connection policy: " + exc.Message);
+            yield break;
+        }
+
+        yield return operation;
+        if (request.result != UnityWebRequest.Result.Success)
+        {
+            onFailure?.Invoke(request.error);
+            yield break;
+        }
+
+        File.WriteAllBytes(path, request.downloadHandler.data);
     }
 
     private string SelectPlaylistKey()
@@ -836,7 +908,20 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
             request.disposeCertificateHandlerOnDispose = true;
         }
 
-        yield return request.SendWebRequest();
+        UnityWebRequestAsyncOperation operation;
+        try
+        {
+            operation = request.SendWebRequest();
+        }
+        catch (InvalidOperationException exc)
+        {
+            NotifyStatus("Netease request blocked by Unity connection policy: " + exc.Message);
+            request.Dispose();
+            onCompleted?.Invoke(null);
+            yield break;
+        }
+
+        yield return operation;
         UpdateCookieFromResponse(request);
         onCompleted?.Invoke(request);
     }

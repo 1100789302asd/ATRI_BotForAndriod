@@ -10,7 +10,6 @@ public sealed class DesktopPetCollapseToggle : MonoBehaviour
     [Header("Targets")]
     [SerializeField] private GameObject petRoot;
     [SerializeField] private RectTransform ball;
-    [SerializeField] private AndroidFloatingBallBridge androidFloatingBall;
 
     [Header("Ball")]
     [SerializeField] private Vector2 ballSize = new Vector2(72f, 72f);
@@ -28,11 +27,6 @@ public sealed class DesktopPetCollapseToggle : MonoBehaviour
 
     private void Awake()
     {
-        if (androidFloatingBall == null)
-        {
-            androidFloatingBall = AndroidFloatingBallBridge.Instance;
-        }
-
         EnsureBall();
         SetCollapsed(startCollapsed);
     }
@@ -71,18 +65,6 @@ public sealed class DesktopPetCollapseToggle : MonoBehaviour
         if (ballImage != null)
         {
             ballImage.color = collapsed ? collapsedColor : expandedColor;
-        }
-
-        if (androidFloatingBall != null)
-        {
-            if (collapsed)
-            {
-                androidFloatingBall.ShowFloatingBall();
-            }
-            else
-            {
-                androidFloatingBall.HideFloatingBall();
-            }
         }
     }
 
