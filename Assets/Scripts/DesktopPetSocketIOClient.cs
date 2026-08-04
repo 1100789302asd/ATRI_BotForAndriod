@@ -43,6 +43,24 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     }
 
     [Serializable]
+    private sealed class SpeechRecognitionSocketPayload
+    {
+        public SpeechRecognitionData data;
+        public string username;
+        public string model_name;
+        public string pet_id;
+        public string special;
+    }
+
+    [Serializable]
+    private sealed class SpeechRecognitionData
+    {
+        public string audio;
+        public string encoding = "pcm_s16le";
+        public int sample_rate = 16000;
+    }
+
+    [Serializable]
     private sealed class SocketFailurePayload
     {
         public string error = "";
@@ -54,7 +72,7 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     [SerializeField] private DesktopPetServerConfig serverConfig;
     [SerializeField] private bool loadServerConfigOnStart = true;
     [SerializeField] private EngineIO engineIoVersion = EngineIO.V4;
-    [SerializeField] private TransportProtocol transport = TransportProtocol.WebSocket;
+    [SerializeField] private TransportProtocol transport = TransportProtocol.Polling;
     [SerializeField] private bool connectOnStart = true;
     [SerializeField] private float socketAnswerTimeoutSeconds = 90f;
 
@@ -73,6 +91,10 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     [SerializeField] private string promptLanguage = "ja";
     [SerializeField] private float voiceRequestTimeoutSeconds = 75f;
 
+    [Header("Speech Recognition")]
+    [SerializeField] private string speechRecognitionEventName = "audio_translate";
+    [SerializeField] private float speechRecognitionTimeoutSeconds = 75f;
+
     [Header("Debug")]
     [SerializeField] private bool logTraffic = true;
     [SerializeField] private bool writeVoiceLogToRenderDebugFile = true;
@@ -89,6 +111,9 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     private int voiceRequestSerial;
     private int activeVoiceRequestId;
     private Coroutine voiceTimeoutCoroutine;
+    private int speechRecognitionRequestSerial;
+    private int activeSpeechRecognitionRequestId;
+    private Coroutine speechRecognitionTimeoutCoroutine;
     private readonly ConcurrentQueue<Action> mainThreadActions = new ConcurrentQueue<Action>();
     private readonly ConcurrentQueue<Action> pendingSocketActions = new ConcurrentQueue<Action>();
 
@@ -229,6 +254,11 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     public void UseGeminiModel()
     {
         SetModelName("gemini");
+    }
+
+    public void UseDeepSeekModel()
+    {
+        SetModelName("deepseek");
     }
 
     public void SetGeminiModelEnabled(bool enabled)
@@ -562,6 +592,69 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
         socket.Emit(voiceProduceEventName, response => HandleVoiceSynthesisAck(requestId, response, jaText, mood), payload);
     }
 
+    public void SendSpeechRecognitionRequest(
+        byte[] pcm16Audio,
+        int sampleRate,
+        Action<string> onCompleted,
+        Action<string> onFailed)
+    {
+        if (pcm16Audio == null || pcm16Audio.Length == 0)
+        {
+            onFailed?.Invoke("Speech recognition audio is empty.");
+            return;
+        }
+
+        var payload = new SpeechRecognitionSocketPayload
+        {
+            username = username,
+            model_name = modelName,
+            pet_id = petId,
+            special = "",
+            data = new SpeechRecognitionData
+            {
+                audio = Convert.ToBase64String(pcm16Audio),
+                sample_rate = Mathf.Max(1, sampleRate)
+            }
+        };
+
+        var requestId = BeginSpeechRecognitionTimeout(onFailed);
+        if (socket == null || !socket.Connected)
+        {
+            Connect();
+            pendingSocketActions.Enqueue(() =>
+            {
+                if (requestId == activeSpeechRecognitionRequestId)
+                {
+                    EmitSpeechRecognitionRequest(payload, pcm16Audio.Length, requestId, onCompleted, onFailed);
+                }
+            });
+            Log("Socket.IO speech recognition request queued until connected.");
+            return;
+        }
+
+        EmitSpeechRecognitionRequest(payload, pcm16Audio.Length, requestId, onCompleted, onFailed);
+    }
+
+    private void EmitSpeechRecognitionRequest(
+        SpeechRecognitionSocketPayload payload,
+        int audioByteCount,
+        int requestId,
+        Action<string> onCompleted,
+        Action<string> onFailed)
+    {
+        if (socket == null || !socket.Connected)
+        {
+            ReportSpeechRecognitionError(requestId, "Socket.IO client is not connected; cannot request speech recognition.", onFailed);
+            return;
+        }
+
+        Log("Socket.IO emit: " + speechRecognitionEventName + " pcm16Bytes=" + audioByteCount + ", sampleRate=" + payload.data.sample_rate);
+        socket.Emit(
+            speechRecognitionEventName,
+            response => HandleSpeechRecognitionAck(requestId, response, onCompleted, onFailed),
+            payload);
+    }
+
     public void TestVoiceSynthesis()
     {
         SendVoiceSynthesisRequest(testVoiceText, testVoiceMood);
@@ -704,6 +797,57 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
             {
                 StartCoroutine(LoadAndSpeakVoice(wavBytes, jaText, mood, requestId));
             }
+        });
+    }
+
+    private void HandleSpeechRecognitionAck(
+        int requestId,
+        SocketIOResponse response,
+        Action<string> onCompleted,
+        Action<string> onFailed)
+    {
+        if (requestId != activeSpeechRecognitionRequestId)
+        {
+            Log("audio_translate ack ignored because request is no longer active. requestId=" + requestId + ", active=" + activeSpeechRecognitionRequestId);
+            return;
+        }
+
+        if (!TryGetFirstRawJson(response, out var rawJson, out var responseError))
+        {
+            EnqueueMain(() => ReportSpeechRecognitionError(requestId, responseError, onFailed));
+            return;
+        }
+
+        string text;
+        string error;
+        try
+        {
+            var payload = Newtonsoft.Json.Linq.JToken.Parse(rawJson);
+            text = payload.SelectToken("text")?.ToString()?.Trim() ?? "";
+            error = payload.SelectToken("error")?.ToString()?.Trim() ?? "";
+        }
+        catch (Exception exc)
+        {
+            text = "";
+            error = "Speech recognition ack is invalid JSON: " + exc.Message;
+        }
+
+        EnqueueMain(() =>
+        {
+            if (requestId != activeSpeechRecognitionRequestId)
+            {
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                ReportSpeechRecognitionError(requestId, error, onFailed);
+                return;
+            }
+
+            CompleteSpeechRecognitionRequest(requestId);
+            Log("audio_translate ack text=\"" + text + "\"");
+            onCompleted?.Invoke(text);
         });
     }
 
@@ -947,6 +1091,65 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
 
         CompleteVoiceRequest(requestId);
         ReportError(message);
+    }
+
+    private int BeginSpeechRecognitionTimeout(Action<string> onFailed)
+    {
+        var requestId = ++speechRecognitionRequestSerial;
+        activeSpeechRecognitionRequestId = requestId;
+
+        if (speechRecognitionTimeoutCoroutine != null)
+        {
+            StopCoroutine(speechRecognitionTimeoutCoroutine);
+        }
+
+        speechRecognitionTimeoutCoroutine = StartCoroutine(SpeechRecognitionTimeoutRoutine(requestId, onFailed));
+        return requestId;
+    }
+
+    private IEnumerator SpeechRecognitionTimeoutRoutine(int requestId, Action<string> onFailed)
+    {
+        yield return new WaitForSecondsRealtime(Mathf.Max(1f, speechRecognitionTimeoutSeconds));
+        if (requestId != activeSpeechRecognitionRequestId)
+        {
+            yield break;
+        }
+
+        activeSpeechRecognitionRequestId = 0;
+        speechRecognitionTimeoutCoroutine = null;
+        var message = "Speech recognition timed out after " + speechRecognitionTimeoutSeconds.ToString("0") + " seconds.";
+        Debug.LogWarning(message, this);
+        AppendVoiceDebugFile("[SttError] " + message);
+        onFailed?.Invoke(message);
+    }
+
+    private void CompleteSpeechRecognitionRequest(int requestId)
+    {
+        if (requestId != activeSpeechRecognitionRequestId)
+        {
+            return;
+        }
+
+        activeSpeechRecognitionRequestId = 0;
+        if (speechRecognitionTimeoutCoroutine != null)
+        {
+            StopCoroutine(speechRecognitionTimeoutCoroutine);
+            speechRecognitionTimeoutCoroutine = null;
+        }
+    }
+
+    private void ReportSpeechRecognitionError(int requestId, string message, Action<string> onFailed)
+    {
+        if (requestId != activeSpeechRecognitionRequestId)
+        {
+            Log("Speech recognition error ignored because request is no longer active. requestId=" + requestId + ", active=" + activeSpeechRecognitionRequestId);
+            return;
+        }
+
+        CompleteSpeechRecognitionRequest(requestId);
+        Debug.LogWarning("Speech recognition failed: " + message, this);
+        AppendVoiceDebugFile("[SttError] " + message);
+        onFailed?.Invoke(message);
     }
 
     private int BeginSocketRequestTimeout(string eventName)
@@ -1270,6 +1473,11 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
         public string neteaseApiBaseUrl = "http://127.0.0.1:3000";
         public string neteaseCellphone = "";
         public string neteaseCountryCode = "86";
+        public string memoryStorageMode = "cloud";
+        public bool memoryStorageSelected;
+        public string localMemoryFolder = "\u8bb0\u5fc6";
+        public string localDialogueHistoryFile = "dialogue_history.txt";
+        public string localSummaryHistoryFile = "summary_history.txt";
     }
 
     [SerializeField] private string configPath = "config/server_config.json";
@@ -1297,6 +1505,31 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
     public string NeteaseCountryCode
     {
         get { return data.neteaseCountryCode; }
+    }
+
+    public string MemoryStorageMode
+    {
+        get { return data.memoryStorageMode; }
+    }
+
+    public bool MemoryStorageSelected
+    {
+        get { return data.memoryStorageSelected; }
+    }
+
+    public string LocalMemoryFolder
+    {
+        get { return data.localMemoryFolder; }
+    }
+
+    public string LocalDialogueHistoryFile
+    {
+        get { return data.localDialogueHistoryFile; }
+    }
+
+    public string LocalSummaryHistoryFile
+    {
+        get { return data.localSummaryHistoryFile; }
     }
 
     public bool IsLoaded
@@ -1340,7 +1573,15 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
                     if (packaged != null &&
                         (!UsesLoopbackUrl(packaged.socketServerUrl) || !UsesLoopbackUrl(packaged.neteaseApiBaseUrl)))
                     {
-                        data = packaged;
+                        if (UsesLoopbackUrl(data.socketServerUrl) && !UsesLoopbackUrl(packaged.socketServerUrl))
+                        {
+                            data.socketServerUrl = packaged.socketServerUrl;
+                        }
+
+                        if (UsesLoopbackUrl(data.neteaseApiBaseUrl) && !UsesLoopbackUrl(packaged.neteaseApiBaseUrl))
+                        {
+                            data.neteaseApiBaseUrl = packaged.neteaseApiBaseUrl;
+                        }
                     }
                 }
                 catch (Exception exc)
@@ -1380,6 +1621,13 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
         Save();
     }
 
+    public void SetMemoryStorageMode(string value)
+    {
+        data.memoryStorageMode = NormalizeMemoryStorageMode(value);
+        data.memoryStorageSelected = true;
+        Save();
+    }
+
     public void Save()
     {
         if (string.IsNullOrWhiteSpace(resolvedConfigPath))
@@ -1411,6 +1659,10 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
         data.neteaseApiBaseUrl = NormalizeUrl(data.neteaseApiBaseUrl, "http://127.0.0.1:3000");
         data.neteaseCellphone = (data.neteaseCellphone ?? "").Trim();
         data.neteaseCountryCode = string.IsNullOrWhiteSpace(data.neteaseCountryCode) ? "86" : data.neteaseCountryCode.Trim();
+        data.memoryStorageMode = NormalizeMemoryStorageMode(data.memoryStorageMode);
+        data.localMemoryFolder = string.IsNullOrWhiteSpace(data.localMemoryFolder) ? "\u8bb0\u5fc6" : data.localMemoryFolder.Trim();
+        data.localDialogueHistoryFile = string.IsNullOrWhiteSpace(data.localDialogueHistoryFile) ? "dialogue_history.txt" : data.localDialogueHistoryFile.Trim();
+        data.localSummaryHistoryFile = string.IsNullOrWhiteSpace(data.localSummaryHistoryFile) ? "summary_history.txt" : data.localSummaryHistoryFile.Trim();
     }
 
     private static string NormalizeUrl(string value, string fallback)
@@ -1433,5 +1685,16 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
     {
         value = (value ?? "").Trim().ToLowerInvariant();
         return value.Contains("127.0.0.1") || value.Contains("localhost");
+    }
+
+    private static string NormalizeMemoryStorageMode(string value)
+    {
+        value = (value ?? "").Trim().ToLowerInvariant();
+        if (value == "local" || value == "\u672c\u5730")
+        {
+            return "local";
+        }
+
+        return "cloud";
     }
 }

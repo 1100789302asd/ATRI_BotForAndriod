@@ -1,6 +1,11 @@
-﻿{
+{
     "socketServerUrl": "http://superpai.nat400.top",
     "neteaseApiBaseUrl": "https://ncm-api.prod.gbclstudio.cn",
     "neteaseCellphone": "",
-    "neteaseCountryCode": "86"
+    "neteaseCountryCode": "86",
+    "memoryStorageMode": "cloud",
+    "memoryStorageSelected": false,
+    "localMemoryFolder": "记忆",
+    "localDialogueHistoryFile": "dialogue_history.txt",
+    "localSummaryHistoryFile": "summary_history.txt"
 }

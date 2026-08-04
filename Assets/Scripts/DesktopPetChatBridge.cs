@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.Events;
+using UnityEngine.UI;
 
 /// <summary>
 /// Dialogue bridge for the migrated desktop pet.
@@ -16,12 +18,15 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     {
         public string role;
         public string content;
+        public string action;
+        public string mood;
+        public string expression;
     }
 
     [Serializable]
     public sealed class SocketCallPayload
     {
-        public ChatMessage[] data;
+        public ChatEnvelope[] data;
         public string username;
         public string model_name;
         public string pet_id;
@@ -43,7 +48,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     [Serializable]
     public sealed class SummaryHistoryServerPayload
     {
-        public ChatMessage[] data;
+        public ChatEnvelope[] data;
         public string username;
         public string model_name;
         public string pet_id;
@@ -55,6 +60,18 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     {
         public string role;
         public string content;
+    }
+
+    [Serializable]
+    private sealed class ModelReply
+    {
+        public string action;
+        public string content;
+        public string cn;
+        public string tts;
+        public string mood;
+        public string expression;
+        public bool rawTextFallback;
     }
 
     [Serializable]
@@ -100,7 +117,8 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     [SerializeField] private int maxHistoryEntries = 50;
     [SerializeField] private bool useSummaryHistory = true;
     [SerializeField] private string summaryHistoryIntro = "接下来是我们对话历史的精炼版，你可以从中参考获得更详细的人设定位。";
-    [SerializeField] private string summaryUpdatePrompt = "这是系统提示，对话即将结束。请把本次会话中值得长期记住的事实、偏好、关系变化和待办事项精炼总结出来，用 & 分隔多条。若没有值得长期记住的内容，只回复 NoSense。";
+    [SerializeField] private string summaryUpdatePrompt = "[系统消息]:这是系统提示，对话即将结束。";
+    [SerializeField] private string finalReplyFormatReminder = "[系统消息]:注意！你不能仿照对话历史的格式回复自然语言，那只是为了减少上下文的精简版。你必须严格遵循上述json格式要求！";
 
     [Header("History Files")]
     [SerializeField] private bool loadHistoryOnAwake = true;
@@ -119,7 +137,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     [SerializeField] private string getSummaryHistoryEventName = "get_summary_history";
     [SerializeField] private string saveDialogueHistoryEventName = "save_dialogue_history";
     [SerializeField] private string updateSummaryHistoryEventName = "update_summary_history";
-    [SerializeField] private float historyRequestTimeoutSeconds = 15f;
+    [SerializeField] private float historyRequestTimeoutSeconds = 60f;
 
     [Header("Debug")]
     [SerializeField] private bool logChatFlow = true;
@@ -141,6 +159,8 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     private readonly List<ChatMessage> currentSessionHistory = new List<ChatMessage>();
     private readonly List<ChatMessage> history = new List<ChatMessage>();
     private readonly List<ChatMessage> promptHistory = new List<ChatMessage>();
+    private string[] availableMoodKeywords = Array.Empty<string>();
+    private string[] availableExpressionKeywords = Array.Empty<string>();
     private bool pendingFullHistoryRequest;
     private DateTime? chatBeginTime;
     private bool isBound;
@@ -156,9 +176,10 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     private string dialogueHistorySaveError = "";
     private bool summaryHistorySaveFinished;
     private string summaryHistorySaveError = "";
-    private bool summaryHistoryUpdateSucceeded = true;
     private string pendingAiLogRole = "";
     private string pendingAiLogText = "";
+    private bool memoryStorageChoiceAnswered;
+    private GameObject memoryStorageChoiceDialog;
 
     private void Reset()
     {
@@ -216,6 +237,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         dialogueHistory.Clear();
 
         yield return LoadPresetHistory();
+        yield return EnsureMemoryStorageModeSelected();
         yield return LoadSummaryHistory();
         yield return LoadDialogueHistory();
         RebuildHistory();
@@ -225,42 +247,109 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
 
     private System.Collections.IEnumerator LoadPresetHistory()
     {
-        if (presetHistoryPaths == null)
+        var rulesPath = GetPresetHistoryPath(0, "config/rules.txt");
+        var rulesText = "";
+        yield return LoadPresetText(rulesPath, text => rulesText = text);
+        if (!string.IsNullOrWhiteSpace(rulesText))
         {
-            yield break;
+            presetHistory.Add(CreateMessage("system", rulesText));
+            Log("Preset rules loaded: " + rulesPath);
+        }
+        else
+        {
+            Log("Preset rules empty or missing: " + rulesPath);
         }
 
-        for (var i = 0; i < presetHistoryPaths.Length; i++)
+        CacheController();
+        if (petController != null)
         {
-            var path = "";
-            yield return DesktopPetResourcePath.EnsureWritableModelFile(presetHistoryPaths[i], false, readyPath => path = readyPath);
+            yield return petController.LoadMoodExpressionConfiguration();
+            availableMoodKeywords = petController.GetAvailableMoodNames();
+            availableExpressionKeywords = petController.GetAvailableExpressionNames();
+        }
 
-            var text = "";
-            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
-            {
-                text = File.ReadAllText(path, System.Text.Encoding.UTF8);
-            }
-            else
-            {
-                yield return DesktopPetResourcePath.ReadPackagedModelText(presetHistoryPaths[i], loaded => text = loaded);
-            }
+        presetHistory.Add(CreateMessage("system", "这是可选心情列表————" + FormatKeywordList(GetAvailableMoodKeywords())));
+        presetHistory.Add(CreateMessage("system", "这是可选表现列表————" + FormatKeywordList(GetAvailableExpressionKeywords())));
 
-            if (!string.IsNullOrWhiteSpace(text))
-            {
-                presetHistory.Add(CreateMessage("developer", text));
-                Log("Preset history loaded: " + (!string.IsNullOrWhiteSpace(path) ? path : presetHistoryPaths[i]));
-            }
-            else
-            {
-                Log("Preset history empty or missing: " + presetHistoryPaths[i]);
-            }
+        var personalPath = GetPresetHistoryPath(1, "config/personal_setting.txt");
+        var personalText = "";
+        yield return LoadPresetText(personalPath, text => personalText = text);
+        if (!string.IsNullOrWhiteSpace(personalText))
+        {
+            presetHistory.Add(CreateMessage("system", personalText));
+            Log("Preset personal setting loaded: " + personalPath);
+        }
+        else
+        {
+            Log("Preset personal setting empty or missing: " + personalPath);
         }
 
         if (useSummaryHistory && !string.IsNullOrWhiteSpace(summaryHistoryIntro))
         {
-            presetHistory.Add(CreateMessage("developer", summaryHistoryIntro));
+            presetHistory.Add(CreateMessage("system", summaryHistoryIntro));
         }
 
+    }
+
+    private string GetPresetHistoryPath(int index, string fallback)
+    {
+        if (presetHistoryPaths == null || index < 0 || index >= presetHistoryPaths.Length)
+        {
+            return fallback;
+        }
+
+        return string.IsNullOrWhiteSpace(presetHistoryPaths[index]) ? fallback : presetHistoryPaths[index];
+    }
+
+    private System.Collections.IEnumerator LoadPresetText(string relativePath, Action<string> onLoaded)
+    {
+        var path = "";
+        yield return DesktopPetResourcePath.EnsureWritableModelFile(relativePath, false, readyPath => path = readyPath);
+
+        if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+        {
+            onLoaded?.Invoke(File.ReadAllText(path, System.Text.Encoding.UTF8));
+            yield break;
+        }
+
+        var text = "";
+        yield return DesktopPetResourcePath.ReadPackagedModelText(relativePath, loaded => text = loaded);
+        onLoaded?.Invoke(text);
+    }
+
+    private string[] GetAvailableMoodKeywords()
+    {
+        return availableMoodKeywords;
+    }
+
+    private string[] GetAvailableExpressionKeywords()
+    {
+        return availableExpressionKeywords;
+    }
+
+    private static string FormatKeywordList(string[] keywords)
+    {
+        if (keywords == null || keywords.Length == 0)
+        {
+            return "[]";
+        }
+
+        var builder = new StringBuilder();
+        builder.Append('[');
+        for (var i = 0; i < keywords.Length; i++)
+        {
+            if (i > 0)
+            {
+                builder.Append(", ");
+            }
+
+            builder.Append('\'');
+            builder.Append((keywords[i] ?? "").Replace("\\", "\\\\").Replace("'", "\\'"));
+            builder.Append('\'');
+        }
+
+        builder.Append(']');
+        return builder.ToString();
     }
 
     private System.Collections.IEnumerator LoadSummaryHistory()
@@ -271,13 +360,28 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         }
 
         yield return EnsureHistoryServerConfigLoaded();
+        if (UseLocalMemoryStorage())
+        {
+            var localMemoryText = LoadLocalMemoryText(serverConfig.LocalSummaryHistoryFile);
+            if (!string.IsNullOrWhiteSpace(localMemoryText))
+            {
+                var parsedCount = AddSummaryHistoryFromText(localMemoryText);
+                Log("Summary history loaded from local memory. parsed=" + parsedCount);
+            }
+            else
+            {
+                Log("Summary history empty in local memory.");
+            }
+
+            yield break;
+        }
 
         summaryHistoryLoadFinished = false;
         summaryHistoryLoadText = "";
         summaryHistoryLoadError = "";
         DialogueHistoryRequested?.Invoke(getSummaryHistoryEventName, BuildHistoryServerPayloadJson(""));
 
-        var timeoutAt = Time.realtimeSinceStartup + Mathf.Max(1f, historyRequestTimeoutSeconds);
+        var timeoutAt = Time.realtimeSinceStartup + GetHistoryRequestTimeoutSeconds();
         while (!summaryHistoryLoadFinished && Time.realtimeSinceStartup < timeoutAt)
         {
             yield return null;
@@ -304,13 +408,28 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     private System.Collections.IEnumerator LoadDialogueHistory()
     {
         yield return EnsureHistoryServerConfigLoaded();
+        if (UseLocalMemoryStorage())
+        {
+            var localMemoryText = LoadLocalMemoryText(serverConfig.LocalDialogueHistoryFile);
+            if (!string.IsNullOrWhiteSpace(localMemoryText))
+            {
+                var parsedCount = AddDialogueHistoryFromText(localMemoryText);
+                Log("Dialogue history loaded from local memory. parsed=" + parsedCount);
+            }
+            else
+            {
+                Log("Dialogue history empty in local memory.");
+            }
+
+            yield break;
+        }
 
         dialogueHistoryLoadFinished = false;
         dialogueHistoryLoadText = "";
         dialogueHistoryLoadError = "";
         DialogueHistoryRequested?.Invoke(getDialogueHistoryEventName, BuildHistoryServerPayloadJson(""));
 
-        var timeoutAt = Time.realtimeSinceStartup + Mathf.Max(1f, historyRequestTimeoutSeconds);
+        var timeoutAt = Time.realtimeSinceStartup + GetHistoryRequestTimeoutSeconds();
         while (!dialogueHistoryLoadFinished && Time.realtimeSinceStartup < timeoutAt)
         {
             yield return null;
@@ -423,12 +542,28 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         Unbind();
     }
 
+    private void OnApplicationPause(bool paused)
+    {
+        if (paused && saveHistoryOnExit)
+        {
+            SaveCurrentSessionHistory();
+        }
+    }
+
     private void OnApplicationQuit()
     {
+        if (saveHistoryOnExit)
+        {
+            SaveCurrentSessionHistory();
+        }
     }
 
     private void OnDestroy()
     {
+        if (saveHistoryOnExit)
+        {
+            SaveCurrentSessionHistory();
+        }
     }
 
     public void Bind()
@@ -456,8 +591,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     }
     public void CheckHeartBeat()
     {
-        // 当且仅当模型等待用户回复，并且已经开启主动模式的情况下，才开始计时，时间到了就允许模型主动开口。
-        if(petController.isInitiative && Time.time-petController.lastSpeakTime>petController.speakInterval && petController.isUserSpeakingTurn)
+        if (petController != null && petController.isInitiative && Time.time - petController.lastSpeakTime > petController.speakInterval && petController.isUserSpeakingTurn)
         {
             AddHistory("user","heart_beat");
             petController.isUserSpeakingTurn=false;
@@ -492,12 +626,27 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         {
             pendingFullHistoryRequest = false;
             WaitingFinished?.Invoke();
-            petController.SetUserSpeakingStatus();
+            if (petController != null)
+            {
+                petController.SetUserSpeakingStatus();
+            }
             ReportFailure(answer);
             return;
         }
 
-        if (IsHistoryRequireAnswer(answer))
+        if (!TryParseModelReply(answer, out var reply, out var parseError))
+        {
+            pendingFullHistoryRequest = false;
+            WaitingFinished?.Invoke();
+            if (petController != null)
+            {
+                petController.SetUserSpeakingStatus();
+            }
+            ReportFailure("AI answer is not valid reply JSON: " + parseError + " Raw answer: " + answer);
+            return;
+        }
+
+        if (IsHistoryRequireAction(reply.action))
         {
             if (!pendingFullHistoryRequest)
             {
@@ -513,24 +662,37 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         }
 
         pendingFullHistoryRequest = false;
-        AddHistory(message);
-        if (string.IsNullOrWhiteSpace(answer) || IsWaitAnswer(answer))
+        AddHistory(CreateAssistantHistoryMessage(reply));
+        if (IsWaitAction(reply.action))
         {
             WaitingFinished?.Invoke();
-            petController.SetUserSpeakingStatus();
+            if (petController != null)
+            {
+                petController.SetUserSpeakingStatus();
+            }
             return;
         }
         
-        AiAnswerReceived?.Invoke(answer);
+        var cnText = reply.cn;
+        var mood = reply.mood;
+        var expression = reply.expression;
+        var jaText = reply.tts;
+        AiAnswerReceived?.Invoke(cnText);
 
-        ParseOldTemplateAnswer(answer, out var cnText, out var mood, out var expression, out var jaText);
-        Log("AI reply parsed. cn=\"" + cnText + "\", mood=\"" + mood + "\", expression=\"" + expression + "\", ja=\"" + jaText + "\"");
+        if (reply.rawTextFallback)
+        {
+            Log("AI raw text fallback. text=\"" + cnText + "\"");
+        }
+        else
+        {
+            Log("AI reply parsed. cn=\"" + cnText + "\", mood=\"" + mood + "\", expression=\"" + expression + "\", tts=\"" + jaText + "\"");
+        }
         var displayRole = string.IsNullOrWhiteSpace(message.role) ? "model" : "atri";
         ReplyParsed?.Invoke(cnText, mood, jaText);
 
         if (petController != null)
         {
-            petController.ReceiveAiAnswer(answer);
+            petController.ReceiveParsedAiAnswer(cnText, expression);
         }
 
         if (!string.IsNullOrWhiteSpace(jaText))
@@ -544,7 +706,14 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         {
             AddChatLogMessage(displayRole, cnText);
             WaitingFinished?.Invoke();
-            ReportFailure("AI answer has no Japanese text after '|', voice synthesis skipped. Raw answer: " + answer);
+            if (reply.rawTextFallback)
+            {
+                ReportFailure("AI returned plain text instead of reply JSON; displayed text only, voice synthesis skipped. Raw answer: " + answer);
+            }
+            else
+            {
+                ReportFailure("AI JSON reply has no tts text, voice synthesis skipped. Raw answer: " + answer);
+            }
         }
     }
 
@@ -589,8 +758,18 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
             return;
         }
 
-        var message = JsonUtility.FromJson<ChatMessage>(json);
-        ReceiveAiAnswer(message);
+        if (!TryReadAnswerResponse(json, out var answer, out var error))
+        {
+            WaitingFinished?.Invoke();
+            ReportFailure(error);
+            return;
+        }
+
+        ReceiveAiAnswer(new ChatMessage
+        {
+            role = "assistant",
+            content = answer
+        });
     }
 
     public string BuildSocketPayloadJson()
@@ -605,11 +784,11 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
 
     public string BuildSummaryUpdatePayloadJson()
     {
-        var messages = new List<ChatMessage>(BuildPromptHistory(false));
-        messages.Add(CreateMessage("developer", summaryUpdatePrompt));
+        var messages = BuildRequestMessages(false);
+        messages.Add(CreateMessage("user", summaryUpdatePrompt));
         return JsonUtility.ToJson(new SummaryHistoryServerPayload
         {
-            data = messages.ToArray(),
+            data = ToChatEnvelopes(messages),
             username = username,
             model_name = modelName,
             pet_id = petId,
@@ -626,7 +805,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     {
         return new SocketCallPayload
         {
-            data = keepHistory ? BuildPromptHistory(includeFullHistory).ToArray() : Array.Empty<ChatMessage>(),
+            data = keepHistory ? ToChatEnvelopes(BuildRequestMessages(includeFullHistory)) : Array.Empty<ChatEnvelope>(),
             username = username,
             model_name = modelName,
             pet_id = petId,
@@ -634,10 +813,33 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         };
     }
 
+    private static ChatEnvelope[] ToChatEnvelopes(IReadOnlyList<ChatMessage> messages)
+    {
+        if (messages == null || messages.Count == 0)
+        {
+            return Array.Empty<ChatEnvelope>();
+        }
+
+        var envelopes = new ChatEnvelope[messages.Count];
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var message = messages[i];
+            envelopes[i] = new ChatEnvelope
+            {
+                role = NormalizePromptRole(message?.role),
+                content = message?.content ?? ""
+            };
+        }
+
+        return envelopes;
+    }
+
     private void RequestSocketAnswer(bool includeFullHistory)
     {
         pendingFullHistoryRequest = includeFullHistory;
-        SocketAnswerRequested?.Invoke(getAnswerEventName, BuildSocketPayloadJson(includeFullHistory));
+        var payloadJson = BuildSocketPayloadJson(includeFullHistory);
+        Debug.Log("AI request context. includeFullHistory=" + includeFullHistory + ", event=" + getAnswerEventName + ", payload=" + payloadJson, this);
+        SocketAnswerRequested?.Invoke(getAnswerEventName, payloadJson);
     }
 
     public void ClearHistory()
@@ -676,6 +878,30 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     public void UseGeminiModel()
     {
         SetModelName("gemini");
+    }
+
+    public void UseDeepSeekModel()
+    {
+        SetModelName("deepseek");
+    }
+
+    public void SetModelByIndex(int index)
+    {
+        switch (index)
+        {
+            case 0:
+                SetModelName("gpt");
+                break;
+            case 1:
+                SetModelName("gemini");
+                break;
+            case 2:
+                SetModelName("deepseek");
+                break;
+            default:
+                Debug.LogWarning("Unsupported AI model dropdown index: " + index, this);
+                break;
+        }
     }
 
     public void SetGeminiModelEnabled(bool enabled)
@@ -748,6 +974,8 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     {
         _ = dialogueHistoryPath;
         _ = createMissingDialogueHistoryFile;
+        _ = userHistoryLabel;
+        _ = modelHistoryLabel;
     }
 
     private void AddHistory(string role, string text)
@@ -781,6 +1009,137 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         }
 
         return message.content ?? "";
+    }
+
+    private static ChatMessage CreateAssistantHistoryMessage(ModelReply reply)
+    {
+        var message = CreateMessage("assistant", reply != null ? reply.content : "");
+        if (reply == null)
+        {
+            return message;
+        }
+
+        message.action = reply.action;
+        if (IsReplyAction(reply.action))
+        {
+            message.mood = reply.mood;
+            message.expression = reply.expression;
+        }
+
+        return message;
+    }
+
+    private bool TryParseModelReply(string text, out ModelReply reply, out string error)
+    {
+        reply = null;
+        error = "";
+
+        try
+        {
+            var payload = Newtonsoft.Json.Linq.JObject.Parse((text ?? "").Trim());
+            var action = (payload.SelectToken("action")?.ToString() ?? "reply").Trim();
+            if (string.IsNullOrWhiteSpace(action))
+            {
+                action = "reply";
+            }
+
+            action = action.ToLowerInvariant();
+            if (!IsReplyAction(action) && !IsWaitAction(action) && !IsHistoryRequireAction(action))
+            {
+                error = "unsupported action: " + action;
+                return false;
+            }
+
+            reply = new ModelReply
+            {
+                action = action,
+                cn = (payload.SelectToken("cn") ?? payload.SelectToken("content"))?.ToString()?.Trim() ?? "",
+                tts = (payload.SelectToken("tts") ?? payload.SelectToken("ja"))?.ToString()?.Trim() ?? "",
+                mood = NormalizeMoodText(payload.SelectToken("mood")?.ToString()),
+                expression = NormalizeMoodText(payload.SelectToken("expression")?.ToString())
+            };
+
+            if (!IsReplyAction(action))
+            {
+                reply.content = string.IsNullOrWhiteSpace(reply.cn) ? action : reply.cn;
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(reply.cn) || string.IsNullOrWhiteSpace(reply.tts))
+            {
+                error = "reply action requires cn and tts";
+                return false;
+            }
+
+            if (!ContainsKeyword(availableMoodKeywords, reply.mood))
+            {
+                reply.mood = availableMoodKeywords.Length > 0 ? availableMoodKeywords[0] : "normal";
+            }
+
+            if (!ContainsKeyword(availableExpressionKeywords, reply.expression))
+            {
+                reply.expression = ContainsKeyword(availableExpressionKeywords, "normal")
+                    ? "normal"
+                    : availableExpressionKeywords.Length > 0 ? availableExpressionKeywords[0] : "";
+            }
+
+            reply.content = reply.cn;
+            return true;
+        }
+        catch (Exception exc)
+        {
+            var fallbackText = (text ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(fallbackText))
+            {
+                error = exc.Message;
+                return false;
+            }
+
+            reply = new ModelReply
+            {
+                action = "reply",
+                content = fallbackText,
+                cn = fallbackText,
+                tts = "",
+                mood = "normal",
+                expression = "normal",
+                rawTextFallback = true
+            };
+            return true;
+        }
+    }
+
+    private static bool ContainsKeyword(string[] keywords, string value)
+    {
+        if (keywords == null)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < keywords.Length; i++)
+        {
+            if (string.Equals(keywords[i], value, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsReplyAction(string action)
+    {
+        return string.Equals(action, "reply", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsHistoryRequireAction(string action)
+    {
+        return string.Equals(action, "history_require", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsWaitAction(string action)
+    {
+        return string.Equals(action, "wait", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsHistoryRequireAnswer(string text)
@@ -826,7 +1185,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         history.AddRange(summaryHistory);
         if (!string.IsNullOrWhiteSpace(recentHistoryIntro))
         {
-            history.Add(CreateMessage("developer", recentHistoryIntro));
+            history.Add(CreateMessage("system", recentHistoryIntro));
         }
         var oldHistoryStart = Mathf.Max(0, dialogueHistory.Count - currentSessionHistory.Count - Mathf.Max(0, maxHistoryEntries));
         for (var i = oldHistoryStart; i < dialogueHistory.Count; i++)
@@ -847,11 +1206,22 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         promptHistory.AddRange(summaryHistory);
         if (!string.IsNullOrWhiteSpace(recentHistoryIntro))
         {
-            promptHistory.Add(CreateMessage("developer", recentHistoryIntro));
+            promptHistory.Add(CreateMessage("system", recentHistoryIntro));
         }
         promptHistory.AddRange(dialogueHistory);
-        promptHistory.Add(CreateMessage("developer", "【系统消息】你已经请求并且获得了全部对话历史。请基于这些历史正式回答用户，不要再次回复 history_require。"));
+        promptHistory.Add(CreateMessage("user", "[系统消息]:你已经请求并且获得了全部对话历史"));
         return promptHistory;
+    }
+
+    private List<ChatMessage> BuildRequestMessages(bool includeFullHistory)
+    {
+        var messages = new List<ChatMessage>(BuildPromptHistory(includeFullHistory));
+        if (!string.IsNullOrWhiteSpace(finalReplyFormatReminder))
+        {
+            messages.Add(CreateMessage("user", finalReplyFormatReminder));
+        }
+
+        return messages;
     }
 
     private static ChatMessage CreateMessage(string role, string text)
@@ -866,9 +1236,14 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     private static string NormalizePromptRole(string role)
     {
         role = (role ?? "").Trim().ToLowerInvariant();
-        if (role == "developer" || role == "user" || role == "assistant")
+        if (role == "system" || role == "user" || role == "assistant")
         {
             return role;
+        }
+
+        if (role == "developer")
+        {
+            return "system";
         }
 
         if (role == "model" || role == "atri")
@@ -882,10 +1257,6 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     private int AddDialogueHistoryFromText(string text)
     {
         var parsed = ParseDialogueHistoryText(text);
-        if (parsed.Count == 0 && !string.IsNullOrWhiteSpace(text))
-        {
-            parsed.Add(CreateMessage("user", text));
-        }
 
         dialogueHistory.AddRange(parsed);
         return parsed.Count;
@@ -894,10 +1265,6 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     private int AddSummaryHistoryFromText(string text)
     {
         var parsed = ParseDialogueHistoryText(text);
-        if (parsed.Count == 0 && !string.IsNullOrWhiteSpace(text))
-        {
-            parsed.Add(CreateMessage("developer", text));
-        }
 
         summaryHistory.AddRange(parsed);
         return parsed.Count;
@@ -920,80 +1287,66 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
                 continue;
             }
 
-            if (TryParseHistoryTimeMarker(line, out var time, out var marker))
+            if (!TryParseHistoryJsonLine(line, messages))
             {
-                messages.Add(CreateMessage("user", BuildHistoryTimeContext(time, marker)));
-                continue;
+                Debug.LogWarning("Dialogue history line is not valid JSONL and was ignored: " + line);
             }
-
-            if (TryParseHistorySpeakerLine(line, out var speaker, out var content))
-            {
-                var role = string.Equals(speaker, userHistoryLabel, StringComparison.OrdinalIgnoreCase)
-                    ? "user"
-                    : "assistant";
-                messages.Add(CreateMessage(role, content));
-                continue;
-            }
-
-            messages.Add(CreateMessage("user", "【历史记录备注】" + line));
         }
 
         return messages;
     }
 
-    private static bool TryParseHistoryTimeMarker(string line, out string time, out string marker)
+    private static bool TryParseHistoryJsonLine(string line, List<ChatMessage> messages)
     {
-        time = "";
-        marker = "";
+        try
+        {
+            var obj = Newtonsoft.Json.Linq.JObject.Parse(line);
+            var eventType = obj.SelectToken("type")?.ToString() ?? "";
+            var startedAt = obj.SelectToken("started_at")?.ToString() ?? "";
+            var endedAt = obj.SelectToken("ended_at")?.ToString() ?? "";
+            var marker = (obj.SelectToken("marker") ?? obj.SelectToken("source"))?.ToString() ?? "";
 
-        var separator = line.IndexOf("-->", StringComparison.Ordinal);
-        if (separator <= 0)
+            if (eventType.EndsWith("session_start", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(startedAt))
+            {
+                messages.Add(CreateMessage("system", "【历史会话信息】一段历史对话开始于 " + startedAt + "，记录标记：" + marker + "。"));
+            }
+
+            var items = obj.SelectToken("messages") as Newtonsoft.Json.Linq.JArray;
+            if (items != null)
+            {
+                for (var i = 0; i < items.Count; i++)
+                {
+                    var messageObj = items[i] as Newtonsoft.Json.Linq.JObject;
+                    if (messageObj == null)
+                    {
+                        continue;
+                    }
+
+                    var role = messageObj.SelectToken("role")?.ToString() ?? "user";
+                    var content = (messageObj.SelectToken("content") ?? messageObj.SelectToken("cn") ?? messageObj.SelectToken("text"))?.ToString() ?? "";
+                    content = content.Trim();
+                    if (string.IsNullOrWhiteSpace(content))
+                    {
+                        continue;
+                    }
+
+                    messages.Add(CreateMessage(role, content));
+                }
+            }
+
+            if (eventType.EndsWith("session_end", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(endedAt))
+            {
+                messages.Add(CreateMessage("system", "【历史会话信息】上一段历史对话结束于 " + endedAt + "。"));
+            }
+
+            return true;
+        }
+        catch
         {
             return false;
         }
-
-        var candidateTime = line.Substring(0, separator).Trim();
-        if (!DateTime.TryParse(candidateTime, out _))
-        {
-            return false;
-        }
-
-        time = candidateTime;
-        marker = line.Substring(separator + 3).Trim();
-        return true;
-    }
-
-    private static bool TryParseHistorySpeakerLine(string line, out string speaker, out string content)
-    {
-        speaker = "";
-        content = "";
-
-        var open = line.IndexOf(" [", StringComparison.Ordinal);
-        var close = line.LastIndexOf(']');
-        if (open <= 0 || close <= open + 2)
-        {
-            return false;
-        }
-
-        speaker = line.Substring(0, open).Trim();
-        content = line.Substring(open + 2, close - open - 2).Trim();
-        return !string.IsNullOrWhiteSpace(speaker) && !string.IsNullOrWhiteSpace(content);
-    }
-
-    private static string BuildHistoryTimeContext(string time, string marker)
-    {
-        marker = marker ?? "";
-        if (marker.IndexOf("结束对话", StringComparison.OrdinalIgnoreCase) >= 0)
-        {
-            return "【历史会话信息】上一段历史对话结束于 " + time + "。";
-        }
-
-        if (marker.IndexOf("唤醒", StringComparison.OrdinalIgnoreCase) >= 0)
-        {
-            return "【历史会话信息】一段历史对话开始于 " + time + "，记录标记：" + marker + "。";
-        }
-
-        return "【历史会话信息】" + time + "：" + marker;
     }
 
     private static void TrimHistoryList(List<ChatMessage> messages, int maxEntries)
@@ -1015,10 +1368,26 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
 
         historySaveInProgress = true;
         yield return EnsureHistoryServerConfigLoaded();
-        yield return UpdateSummaryHistoryRoutine();
-        if (!summaryHistoryUpdateSucceeded)
+        if (UseLocalMemoryStorage())
         {
+            if (!TryAppendLocalMemoryText(serverConfig.LocalDialogueHistoryFile, text, out var localError))
+            {
+                historySaveInProgress = false;
+                Debug.LogWarning("Failed to save chat history locally: " + localError, this);
+                yield break;
+            }
+
             historySaveInProgress = false;
+            historySaved = true;
+            Log("Chat history saved to local memory.");
+            if (useSummaryHistory)
+            {
+                Log("Summary history update skipped in local memory mode.");
+            }
+
+            currentSessionHistory.Clear();
+            chatBeginTime = null;
+            RebuildHistory();
             yield break;
         }
 
@@ -1026,7 +1395,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         dialogueHistorySaveError = "";
         DialogueHistoryRequested?.Invoke(saveDialogueHistoryEventName, BuildHistoryServerPayloadJson(text));
 
-        var timeoutAt = Time.realtimeSinceStartup + Mathf.Max(1f, historyRequestTimeoutSeconds);
+        var timeoutAt = Time.realtimeSinceStartup + GetHistoryRequestTimeoutSeconds();
         while (!dialogueHistorySaveFinished && Time.realtimeSinceStartup < timeoutAt)
         {
             yield return null;
@@ -1041,14 +1410,15 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         }
 
         historySaved = true;
+        Log("Chat history saved to server.");
+        yield return UpdateSummaryHistoryRoutine();
         currentSessionHistory.Clear();
         chatBeginTime = null;
-        Log("Chat history saved to server.");
+        RebuildHistory();
     }
 
     private System.Collections.IEnumerator UpdateSummaryHistoryRoutine()
     {
-        summaryHistoryUpdateSucceeded = true;
         if (!useSummaryHistory || currentSessionHistory.Count == 0)
         {
             yield break;
@@ -1058,7 +1428,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         summaryHistorySaveError = "";
         DialogueHistoryRequested?.Invoke(updateSummaryHistoryEventName, BuildSummaryUpdatePayloadJson());
 
-        var saveTimeoutAt = Time.realtimeSinceStartup + Mathf.Max(1f, historyRequestTimeoutSeconds);
+        var saveTimeoutAt = Time.realtimeSinceStartup + GetHistoryRequestTimeoutSeconds();
         while (!summaryHistorySaveFinished && Time.realtimeSinceStartup < saveTimeoutAt)
         {
             yield return null;
@@ -1067,7 +1437,6 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         var saveError = summaryHistorySaveFinished ? summaryHistorySaveError : "Socket.IO update_summary_history timed out.";
         if (!string.IsNullOrWhiteSpace(saveError))
         {
-            summaryHistoryUpdateSucceeded = false;
             Debug.LogWarning("Failed to save summary history: " + saveError, this);
             yield break;
         }
@@ -1078,42 +1447,111 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     private string BuildCurrentSessionHistoryText()
     {
         var builder = new StringBuilder();
-        builder.Append(FormatHistoryTime(chatBeginTime ?? DateTime.Now));
-        builder.Append("-->唤醒atri--移动端\n");
+        var startedAt = FormatHistoryTime(chatBeginTime ?? DateTime.Now);
+        AppendHistoryRow(builder, "dialogue_session_start", Array.Empty<ChatMessage>(), startedAt, "", "唤醒atri--移动端");
 
         for (var i = 0; i < currentSessionHistory.Count; i++)
         {
-            var message = currentSessionHistory[i];
-            var label = string.Equals(message.role, "user", StringComparison.OrdinalIgnoreCase)
-                ? userHistoryLabel
-                : modelHistoryLabel;
-
-            builder.Append(label);
-            builder.Append(" [");
-            builder.Append(GetMessageText(message));
-            builder.Append("]\n");
+            AppendHistoryRow(builder, "dialogue_message", new[] { currentSessionHistory[i] });
         }
 
-        builder.Append(FormatHistoryTime(DateTime.Now));
-        builder.Append("-->结束对话\n\n");
+        var endedAt = FormatHistoryTime(DateTime.Now);
+        AppendHistoryRow(builder, "dialogue_session_end", Array.Empty<ChatMessage>(), "", endedAt, "");
+
         return builder.ToString();
     }
 
     private string BuildSummaryHistoryText(string summary)
     {
         var builder = new StringBuilder();
-        builder.Append(FormatHistoryTime(chatBeginTime ?? DateTime.Now));
-        builder.Append("-->唤醒atri--移动端\n");
-        builder.Append((summary ?? "").Replace("&", "\n"));
-        builder.Append("\n");
-        builder.Append(FormatHistoryTime(DateTime.Now));
-        builder.Append("-->结束对话\n\n");
+        var startedAt = FormatHistoryTime(chatBeginTime ?? DateTime.Now);
+        AppendHistoryRow(builder, "summary_session_start", Array.Empty<ChatMessage>(), startedAt, "", "唤醒atri--移动端");
+
+        var parts = (summary ?? "").Split(new[] { '&' }, StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var content = parts[i].Trim();
+            if (!string.IsNullOrWhiteSpace(content))
+            {
+                AppendHistoryRow(builder, "summary_message", new[] { CreateMessage("user", content) });
+            }
+        }
+
+        var endedAt = FormatHistoryTime(DateTime.Now);
+        AppendHistoryRow(builder, "summary_session_end", Array.Empty<ChatMessage>(), "", endedAt, "");
+
         return builder.ToString();
     }
 
     private static string FormatHistoryTime(DateTime time)
     {
         return time.ToString("yyyy-MM-dd HH:mm:ss");
+    }
+
+    private static void AppendHistoryRow(
+        StringBuilder builder,
+        string type,
+        ChatMessage[] messages,
+        string startedAt = "",
+        string endedAt = "",
+        string marker = "")
+    {
+        var row = new Newtonsoft.Json.Linq.JObject
+        {
+            ["type"] = type ?? "dialogue_message"
+        };
+
+        if (!string.IsNullOrWhiteSpace(startedAt))
+        {
+            row["started_at"] = startedAt;
+        }
+
+        if (!string.IsNullOrWhiteSpace(endedAt))
+        {
+            row["ended_at"] = endedAt;
+        }
+
+        if (!string.IsNullOrWhiteSpace(marker))
+        {
+            row["marker"] = marker;
+        }
+
+        var array = new Newtonsoft.Json.Linq.JArray();
+        for (var i = 0; messages != null && i < messages.Length; i++)
+        {
+            var message = messages[i];
+            if (message == null || string.IsNullOrWhiteSpace(message.content))
+            {
+                continue;
+            }
+
+            var item = new Newtonsoft.Json.Linq.JObject
+            {
+                ["role"] = NormalizePromptRole(message.role),
+                ["content"] = message.content
+            };
+
+            if (!string.IsNullOrWhiteSpace(message.action))
+            {
+                item["action"] = message.action;
+            }
+
+            if (!string.IsNullOrWhiteSpace(message.mood))
+            {
+                item["mood"] = message.mood;
+            }
+
+            if (!string.IsNullOrWhiteSpace(message.expression))
+            {
+                item["expression"] = message.expression;
+            }
+
+            array.Add(item);
+        }
+
+        row["messages"] = array;
+        builder.Append(row.ToString(Newtonsoft.Json.Formatting.None));
+        builder.Append('\n');
     }
 
     private string BuildHistoryServerPayloadJson(string text)
@@ -1128,6 +1566,11 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
             data = text ?? "",
             dialogue_history = text ?? ""
         });
+    }
+
+    private float GetHistoryRequestTimeoutSeconds()
+    {
+        return Mathf.Max(60f, historyRequestTimeoutSeconds);
     }
 
     private System.Collections.IEnumerator EnsureHistoryServerConfigLoaded()
@@ -1146,6 +1589,220 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         {
             serverUrl = NormalizeServerUrl(serverUrl, "http://127.0.0.1:5000");
         }
+    }
+
+    private System.Collections.IEnumerator EnsureMemoryStorageModeSelected()
+    {
+        yield return EnsureHistoryServerConfigLoaded();
+        if (serverConfig == null || serverConfig.MemoryStorageSelected)
+        {
+            yield break;
+        }
+
+        memoryStorageChoiceAnswered = false;
+        ShowMemoryStorageChoiceDialog();
+        while (!memoryStorageChoiceAnswered)
+        {
+            yield return null;
+        }
+    }
+
+    private void ShowMemoryStorageChoiceDialog()
+    {
+        if (memoryStorageChoiceDialog != null)
+        {
+            Destroy(memoryStorageChoiceDialog);
+        }
+
+        EnsureEventSystem();
+
+        memoryStorageChoiceDialog = new GameObject("MemoryStorageChoiceDialog");
+        var canvas = memoryStorageChoiceDialog.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.sortingOrder = short.MaxValue;
+        var scaler = memoryStorageChoiceDialog.AddComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1080f, 1920f);
+        scaler.matchWidthOrHeight = 0.5f;
+        memoryStorageChoiceDialog.AddComponent<GraphicRaycaster>();
+
+        var root = memoryStorageChoiceDialog.GetComponent<RectTransform>();
+        root.anchorMin = Vector2.zero;
+        root.anchorMax = Vector2.one;
+        root.offsetMin = Vector2.zero;
+        root.offsetMax = Vector2.zero;
+
+        var blocker = CreateRect("Blocker", root);
+        var blockerImage = blocker.gameObject.AddComponent<Image>();
+        blockerImage.color = new Color(0f, 0f, 0f, 0.62f);
+        blocker.anchorMin = Vector2.zero;
+        blocker.anchorMax = Vector2.one;
+        blocker.offsetMin = Vector2.zero;
+        blocker.offsetMax = Vector2.zero;
+
+        var panel = CreateRect("Panel", root);
+        panel.anchorMin = new Vector2(0.5f, 0.5f);
+        panel.anchorMax = new Vector2(0.5f, 0.5f);
+        panel.pivot = new Vector2(0.5f, 0.5f);
+        panel.sizeDelta = new Vector2(720f, 360f);
+        panel.anchoredPosition = Vector2.zero;
+        var panelImage = panel.gameObject.AddComponent<Image>();
+        panelImage.color = new Color(0.12f, 0.13f, 0.15f, 0.98f);
+
+        AddText(panel, "\u9996\u6b21\u4f7f\u7528\u8bf7\u9009\u62e9\u8bb0\u5fc6\u4fdd\u5b58\u4f4d\u7f6e", 34, new Vector2(0f, 105f), new Vector2(640f, 56f), TextAnchor.MiddleCenter);
+        AddText(panel, "\u4e91\u7aef\uff1a\u7ee7\u7eed\u4f7f\u7528\u670d\u52a1\u7aef\u5386\u53f2\u8bb0\u5f55\u3002\n\u672c\u5730\uff1a\u5386\u53f2\u8bb0\u5f55\u4fdd\u5b58\u5728\u672c\u673a\u8bb0\u5fc6\u6587\u4ef6\u5939\u3002", 24, new Vector2(0f, 25f), new Vector2(620f, 96f), TextAnchor.MiddleCenter);
+
+        AddChoiceButton(panel, "\u4e91\u7aef\u8bb0\u5fc6", new Vector2(-170f, -105f), () => ChooseMemoryStorageMode("cloud"));
+        AddChoiceButton(panel, "\u672c\u5730\u8bb0\u5fc6", new Vector2(170f, -105f), () => ChooseMemoryStorageMode("local"));
+    }
+
+    private void ChooseMemoryStorageMode(string mode)
+    {
+        if (serverConfig != null)
+        {
+            serverConfig.SetMemoryStorageMode(mode);
+        }
+
+        if (memoryStorageChoiceDialog != null)
+        {
+            Destroy(memoryStorageChoiceDialog);
+            memoryStorageChoiceDialog = null;
+        }
+
+        memoryStorageChoiceAnswered = true;
+        Log("Memory storage mode selected: " + mode);
+    }
+
+    private static void EnsureEventSystem()
+    {
+        if (FindFirstObjectByType<EventSystem>() != null)
+        {
+            return;
+        }
+
+        var eventSystem = new GameObject("EventSystem");
+        eventSystem.AddComponent<EventSystem>();
+        eventSystem.AddComponent<StandaloneInputModule>();
+    }
+
+    private static RectTransform CreateRect(string name, Transform parent)
+    {
+        var obj = new GameObject(name);
+        obj.transform.SetParent(parent, false);
+        return obj.AddComponent<RectTransform>();
+    }
+
+    private static void AddText(RectTransform parent, string text, int fontSize, Vector2 position, Vector2 size, TextAnchor alignment)
+    {
+        var rect = CreateRect("Text", parent);
+        rect.sizeDelta = size;
+        rect.anchoredPosition = position;
+        var label = rect.gameObject.AddComponent<Text>();
+        label.font = GetBuiltinUiFont();
+        label.text = text;
+        label.fontSize = fontSize;
+        label.alignment = alignment;
+        label.color = Color.white;
+        label.horizontalOverflow = HorizontalWrapMode.Wrap;
+        label.verticalOverflow = VerticalWrapMode.Overflow;
+    }
+
+    private static void AddChoiceButton(RectTransform parent, string text, Vector2 position, UnityEngine.Events.UnityAction action)
+    {
+        var rect = CreateRect("ChoiceButton", parent);
+        rect.sizeDelta = new Vector2(240f, 68f);
+        rect.anchoredPosition = position;
+
+        var image = rect.gameObject.AddComponent<Image>();
+        image.color = new Color(0.24f, 0.43f, 0.78f, 1f);
+
+        var button = rect.gameObject.AddComponent<Button>();
+        button.targetGraphic = image;
+        button.onClick.AddListener(action);
+
+        AddText(rect, text, 26, Vector2.zero, rect.sizeDelta, TextAnchor.MiddleCenter);
+    }
+
+    private static Font GetBuiltinUiFont()
+    {
+        var font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        if (font != null)
+        {
+            return font;
+        }
+
+        return Resources.GetBuiltinResource<Font>("Arial.ttf");
+    }
+
+    private bool UseLocalMemoryStorage()
+    {
+        return serverConfig != null &&
+               string.Equals(serverConfig.MemoryStorageMode, "local", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string LoadLocalMemoryText(string fileName)
+    {
+        var path = GetLocalMemoryFilePath(fileName);
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return "";
+        }
+
+        try
+        {
+            return File.ReadAllText(path, System.Text.Encoding.UTF8);
+        }
+        catch (Exception exc)
+        {
+            Debug.LogWarning("Failed to load local memory file: " + path + " " + exc.Message, this);
+            return "";
+        }
+    }
+
+    private bool TryAppendLocalMemoryText(string fileName, string text, out string error)
+    {
+        error = "";
+        var path = GetLocalMemoryFilePath(fileName);
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            error = "local memory file path is empty.";
+            return false;
+        }
+
+        try
+        {
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            File.AppendAllText(path, text ?? "", System.Text.Encoding.UTF8);
+            return true;
+        }
+        catch (Exception exc)
+        {
+            error = exc.Message;
+            return false;
+        }
+    }
+
+    private string GetLocalMemoryFilePath(string fileName)
+    {
+        var folder = serverConfig != null ? serverConfig.LocalMemoryFolder : "\u8bb0\u5fc6";
+        folder = string.IsNullOrWhiteSpace(folder) ? "\u8bb0\u5fc6" : folder.Trim();
+        fileName = string.IsNullOrWhiteSpace(fileName) ? "dialogue_history.txt" : fileName.Trim();
+
+        if (Path.IsPathRooted(fileName))
+        {
+            return fileName;
+        }
+
+        var baseFolder = Path.IsPathRooted(folder)
+            ? folder
+            : DesktopPetResourcePath.GetWritableModelPath(folder);
+
+        return Path.Combine(baseFolder, fileName);
     }
 
     private static bool TryReadDialogueHistoryResponse(string response, out string text, out string error)
@@ -1212,6 +1869,18 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         try
         {
             var token = Newtonsoft.Json.Linq.JToken.Parse(response);
+            if (token is Newtonsoft.Json.Linq.JValue value)
+            {
+                text = value.ToString();
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    return true;
+                }
+
+                error = "answer response string is empty.";
+                return false;
+            }
+
             if (token is Newtonsoft.Json.Linq.JObject obj)
             {
                 var errorToken = obj.SelectToken("error") ?? obj.SelectToken("detail");
@@ -1380,13 +2049,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
 
     private static string NormalizeMoodText(string mood)
     {
-        mood = (mood ?? "").Trim().Trim('*').Trim();
-        if (string.Equals(mood, "\u5F7B\u5E95\u9ED1\u5316", StringComparison.OrdinalIgnoreCase))
-        {
-            return "\u5F7B\u5E95\u574F\u6389";
-        }
-
-        return string.Equals(mood, "\u59D4\u5C48\u60F3\u54ED", StringComparison.OrdinalIgnoreCase) ? "sad" : mood;
+        return (mood ?? "").Trim().Trim('*').Trim();
     }
 
     void Update()

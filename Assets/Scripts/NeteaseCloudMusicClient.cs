@@ -38,6 +38,7 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
     [Header("References")]
     [SerializeField] private DesktopPetMigratedController petController;
     [SerializeField] private AndroidNativeMusicBridge androidMusicBridge;
+    [SerializeField] private NeteaseCaptchaDialog captchaDialog;
 
     [Header("API Enhanced")]
     [SerializeField] private string apiBaseUrl = "http://127.0.0.1:3000";
@@ -121,6 +122,16 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         get { return musicOn; }
     }
 
+    public string LoginCellphone
+    {
+        get { return loginCellphone; }
+    }
+
+    public string LoginCountryCode
+    {
+        get { return loginCountryCode; }
+    }
+
     public bool CanHandleMusic
     {
         get { return isNeteaseLoaded; }
@@ -136,6 +147,7 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
     {
         CacheController();
         CacheAndroidMusicBridge();
+        CacheCaptchaDialog();
         CacheServerConfig();
         if (petController != null)
         {
@@ -291,6 +303,31 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         NotifyStatus("Netease mood mode.");
     }
 
+    public void SetPlaylistModeByIndex(int index)
+    {
+        switch (index)
+        {
+            case 0:
+                inLike = false;
+                inDaily = true;
+                NotifyStatus("Netease daily mode.");
+                PlayRandomMusic();
+                break;
+            case 1:
+                inLike = true;
+                inDaily = false;
+                NotifyStatus("Netease like mode.");
+                PlayRandomMusic();
+                break;
+            case 2:
+                UseMoodMode();
+                break;
+            default:
+                Debug.LogWarning("Unsupported playlist dropdown index: " + index, this);
+                break;
+        }
+    }
+
     public void PlayRandomMusic()
     {
         if (!musicOn)
@@ -357,6 +394,19 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         }
     }
 
+    public void RequestNeteaseLoginCode(string cellphone)
+    {
+        SetNeteaseCellphone(cellphone);
+        RequestNeteaseLoginCode();
+    }
+
+    public void RequestNeteaseLoginCode(string cellphone, string countryCode)
+    {
+        SetNeteaseCellphone(cellphone);
+        SetNeteaseCountryCode(countryCode);
+        RequestNeteaseLoginCode();
+    }
+
     public void SubmitNeteaseLoginCode(string captcha)
     {
         if (!isSubmittingCaptcha)
@@ -368,6 +418,13 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
     public void SubmitNeteaseLoginCode(string cellphone, string captcha)
     {
         SetNeteaseCellphone(cellphone);
+        SubmitNeteaseLoginCode(captcha);
+    }
+
+    public void SubmitNeteaseLoginCode(string cellphone, string countryCode, string captcha)
+    {
+        SetNeteaseCellphone(cellphone);
+        SetNeteaseCountryCode(countryCode);
         SubmitNeteaseLoginCode(captcha);
     }
 
@@ -497,6 +554,7 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         var loggedIn = false;
         yield return RequestJsonWithoutCookie(path, json =>
         {
+            CaptureCookieFromLoginResponse(json);
             loggedIn = IsNeteaseOk(json) ||
                        json.SelectToken("account.id") != null ||
                        json.SelectToken("body.account.id") != null ||
@@ -1121,6 +1179,24 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
 #endif
     }
 
+    private void CacheCaptchaDialog()
+    {
+        if (captchaDialog != null)
+        {
+            return;
+        }
+
+#if UNITY_2023_1_OR_NEWER
+        captchaDialog = FindFirstObjectByType<NeteaseCaptchaDialog>(FindObjectsInactive.Include);
+#else
+        var dialogs = Resources.FindObjectsOfTypeAll<NeteaseCaptchaDialog>();
+        if (dialogs != null && dialogs.Length > 0)
+        {
+            captchaDialog = dialogs[0];
+        }
+#endif
+    }
+
     private void BindAndroidMusicBridge()
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -1308,6 +1384,39 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
         }
     }
 
+    private void CaptureCookieFromLoginResponse(JObject json)
+    {
+        var cookieToken = json?["cookie"] ?? json?.SelectToken("body.cookie");
+        if (cookieToken == null)
+        {
+            return;
+        }
+
+        if (cookieToken.Type == JTokenType.String)
+        {
+            var header = cookieToken.Value<string>() ?? "";
+            if (!string.IsNullOrWhiteSpace(header))
+            {
+                cookieHeader = header;
+                MergeCookieHeader(header);
+            }
+
+            return;
+        }
+
+        if (cookieToken.Type != JTokenType.Object)
+        {
+            return;
+        }
+
+        foreach (var prop in ((JObject)cookieToken).Properties())
+        {
+            cookieValues[prop.Name] = prop.Value.Value<string>() ?? "";
+        }
+
+        cookieHeader = BuildCookieHeader();
+    }
+
     private void UpdateCookieFromResponse(UnityWebRequest request)
     {
         var setCookie = request.GetResponseHeader("Set-Cookie");
@@ -1424,6 +1533,12 @@ public sealed class NeteaseCloudMusicClient : MonoBehaviour
 
     private void NotifyLoginFailed(string message)
     {
+        CacheCaptchaDialog();
+        if (captchaDialog != null)
+        {
+            captchaDialog.ShowLoginFailed(message);
+        }
+
         NotifyStatus(message);
         LoginFailed?.Invoke(message);
     }

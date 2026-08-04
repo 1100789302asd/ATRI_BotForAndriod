@@ -11,12 +11,11 @@ public static class DesktopPetResourcePath
 
     public static string GetWritableModelPath(string relativePath)
     {
-#if UNITY_EDITOR
-        if (!Path.IsPathRooted(relativePath))
+        if (Path.IsPathRooted(relativePath))
         {
-            return GetEditorModelPath(relativePath);
+            return relativePath;
         }
-#endif
+
         return Path.Combine(Application.persistentDataPath, GetModelRelativePath(relativePath));
     }
 
@@ -61,14 +60,6 @@ public static class DesktopPetResourcePath
             Directory.CreateDirectory(directory);
         }
 
-        var editorPath = GetEditorModelPath(relativePath);
-        if (File.Exists(editorPath))
-        {
-            File.Copy(editorPath, writablePath, true);
-            onReady?.Invoke(writablePath);
-            yield break;
-        }
-
         var streamingPath = GetStreamingModelPath(relativePath);
         using (var request = UnityWebRequest.Get(ToRequestUrl(streamingPath)))
         {
@@ -79,6 +70,14 @@ public static class DesktopPetResourcePath
                 onReady?.Invoke(writablePath);
                 yield break;
             }
+        }
+
+        var editorPath = GetEditorModelPath(relativePath);
+        if (File.Exists(editorPath))
+        {
+            File.Copy(editorPath, writablePath, true);
+            onReady?.Invoke(writablePath);
+            yield break;
         }
 
         if (createIfMissing)
@@ -101,6 +100,17 @@ public static class DesktopPetResourcePath
             yield break;
         }
 
+        var streamingPath = GetStreamingModelPath(relativePath);
+        using (var request = UnityWebRequest.Get(ToRequestUrl(streamingPath)))
+        {
+            yield return request.SendWebRequest();
+            if (request.result == UnityWebRequest.Result.Success)
+            {
+                onLoaded?.Invoke(request.downloadHandler.text);
+                yield break;
+            }
+        }
+
         var editorPath = GetEditorModelPath(relativePath);
         if (File.Exists(editorPath))
         {
@@ -108,12 +118,7 @@ public static class DesktopPetResourcePath
             yield break;
         }
 
-        var streamingPath = GetStreamingModelPath(relativePath);
-        using (var request = UnityWebRequest.Get(ToRequestUrl(streamingPath)))
-        {
-            yield return request.SendWebRequest();
-            onLoaded?.Invoke(request.result == UnityWebRequest.Result.Success ? request.downloadHandler.text : "");
-        }
+        onLoaded?.Invoke("");
     }
 
     public static IEnumerator ListPackagedModelFolderFiles(string relativeOrAbsoluteFolder, Action<List<string>> onLoaded)
@@ -126,18 +131,31 @@ public static class DesktopPetResourcePath
             yield break;
         }
 
-        var editorFolder = GetEditorModelPath(relativeOrAbsoluteFolder);
-        if (Directory.Exists(editorFolder))
+        var writableFolder = GetWritableModelPath(relativeOrAbsoluteFolder);
+        if (Directory.Exists(writableFolder))
         {
-            AddDirectFolderFiles(files, editorFolder);
-            onLoaded?.Invoke(files);
-            yield break;
+            AddDirectFolderFiles(files, writableFolder);
+            if (files.Count > 0)
+            {
+                onLoaded?.Invoke(files);
+                yield break;
+            }
+
+            files.Clear();
         }
 
         var streamingFolder = GetStreamingModelPath(relativeOrAbsoluteFolder);
         if (!IsUrl(streamingFolder) && Directory.Exists(streamingFolder))
         {
             AddDirectFolderFiles(files, streamingFolder);
+            onLoaded?.Invoke(files);
+            yield break;
+        }
+
+        var editorFolder = GetEditorModelPath(relativeOrAbsoluteFolder);
+        if (Directory.Exists(editorFolder))
+        {
+            AddDirectFolderFiles(files, editorFolder);
             onLoaded?.Invoke(files);
             yield break;
         }
@@ -152,7 +170,8 @@ public static class DesktopPetResourcePath
             for (var i = 0; i < lines.Length; i++)
             {
                 var entry = NormalizeRelativePath(lines[i].Trim());
-                if (entry.StartsWith(folderPrefix, StringComparison.OrdinalIgnoreCase))
+                if (entry.StartsWith(folderPrefix, StringComparison.OrdinalIgnoreCase) &&
+                    entry.Substring(folderPrefix.Length).IndexOf('/') < 0)
                 {
                     files.Add(GetStreamingModelPath(entry));
                 }

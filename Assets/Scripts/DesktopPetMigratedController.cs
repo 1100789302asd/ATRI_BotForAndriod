@@ -22,13 +22,19 @@ using UnityEngine.InputSystem;
 public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatable
 {
     [Serializable]
-    public sealed class MoodProfile
+    private sealed class ModelReply
     {
-        public string mood = "normal";
-        public string expressionName = "normal";
-        [Range(0f, 1f)]
-        public float mouthOpen = 0.6f;
-        public float shakeRange = 0f;
+        public string action;
+        public string content;
+        public string cn;
+        public string mood;
+        public string expression;
+    }
+
+    private sealed class ExpressionEffect
+    {
+        public float mouthOpen = 0.5f;
+        public float shakeRange;
     }
 
     [Header("Live2D")]
@@ -58,18 +64,8 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
 
     [Header("Mood")]
     [SerializeField] private string currentMood = "happy";
-    [SerializeField] private MoodProfile[] moodProfiles =
-    {
-        new MoodProfile { mood = "happy", expressionName = "happy", mouthOpen = 0.8f, shakeRange = 8f },
-        new MoodProfile { mood = "sad", expressionName = "sad", mouthOpen = 0.4f, shakeRange = 0f },
-        new MoodProfile { mood = "normal", expressionName = "normal", mouthOpen = 0.6f, shakeRange = 0f },
-        new MoodProfile { mood = "shy", expressionName = "shy", mouthOpen = 0.3f, shakeRange = 2f },
-        new MoodProfile { mood = "confuse", expressionName = "confuse", mouthOpen = 0.6f, shakeRange = 0f },
-        new MoodProfile { mood = "得意", expressionName = "得意", mouthOpen = 0.8f, shakeRange = 8f },
-        new MoodProfile { mood = "气急败坏", expressionName = "气急败坏", mouthOpen = 0.8f, shakeRange = 0f },
-        new MoodProfile { mood = "赌气", expressionName = "赌气", mouthOpen = 0.8f, shakeRange = 0f },
-        new MoodProfile { mood = "彻底坏掉", expressionName = "彻底黑化", mouthOpen = 0.3f, shakeRange = 0f }
-    };
+    [SerializeField] private string voiceReferenceFolder = "config/voice_refs";
+    [SerializeField] private string expressionEffectConfigPath = "config/expression_effect.json";
     public bool isBodyShaking;
     [Header("Parameters")]
     [SerializeField] private string mouthOpenParameter = "ParamMouthOpenY";
@@ -93,6 +89,22 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     [SerializeField] private bool musicEnabled = true;
     [SerializeField] private bool autoPlayNextMusic = true;
     [SerializeField] private string displayedText = "";
+
+    [Header("Voice Input")]
+    [SerializeField] private DesktopPetSocketIOClient socketClient;
+    [SerializeField] private int voiceInputSampleRate = 16000;
+    [SerializeField] private float voiceInputCheckIntervalSeconds = 0.1f;
+    [SerializeField] private float voiceInputStartThreshold = 0.03f;
+    [SerializeField] private float voiceInputSilenceThreshold = 0.02f;
+    [SerializeField] private float voiceInputSilenceDuration = 1.2f;
+    [SerializeField] private float voiceInputMaxRecordSeconds = 12f;
+    [SerializeField] private float voiceInputMinRecordSeconds = 0.3f;
+    [SerializeField] private int voiceInputSpeechStartFrames = 2;
+    [SerializeField] private int voiceInputPreBufferFrames = 3;
+    [SerializeField] private float mobileVoiceInputThresholdScale = 0.4f;
+    [SerializeField] private float voiceInputStartupTimeoutSeconds = 5f;
+    [SerializeField] private bool submitPlaceholderOnVoiceInputFailure = true;
+    [SerializeField] private string emptyVoiceInputText = "......";
 
     [Header("Debug Android Render")]
     [SerializeField] private bool logRenderStateOnStart = true;
@@ -128,7 +140,18 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     private float trackedMusicStartedAt = -1f;
     private float trackedMusicLength;
     private string pendingExpressionName = "";
+    private string currentExpression = "normal";
+    private readonly List<string> availableMoodNames = new List<string>();
+    private readonly List<string> availableExpressionNames = new List<string>();
+    private readonly Dictionary<string, ExpressionEffect> expressionEffects = new Dictionary<string, ExpressionEffect>(StringComparer.Ordinal);
+    private bool moodExpressionConfigurationLoaded;
+    private bool moodExpressionConfigurationLoading;
     private readonly List<string> recentUnityLogs = new List<string>();
+    private Coroutine voiceInputCoroutine;
+    private AudioClip microphoneClip;
+    private string microphoneDevice = "";
+    private int microphoneReadPosition;
+    private int microphoneCaptureSampleRate;
 
     public bool HasUpdateController { get; set; }
 
@@ -208,11 +231,13 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     private void Reset()
     {
         CacheComponents();
+        CacheSocketClient();
     }
 
     private void Awake()
     {
         CacheComponents();
+        CacheSocketClient();
         Application.runInBackground = true;
         AudioListener.pause = false;
         ConfigureAudioSourcesForBackground();
@@ -224,12 +249,14 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     {
         HookUnityLogFile();
         CacheComponents();
+        CacheSocketClient();
         HasUpdateController = GetComponent<CubismUpdateController>() != null;
         RefreshCubismUpdateController();
     }
 
     private void OnDisable()
     {
+        StopVoiceInput();
         UnhookUnityLogFile();
     }
 
@@ -251,6 +278,7 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         HasUpdateController = GetComponent<CubismUpdateController>() != null;
         RefreshCubismUpdateController();
         PlayIdle();
+        StartCoroutine(LoadMoodExpressionConfiguration());
 
         if (loadAudioFilesOnStart)
         {
@@ -342,7 +370,20 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
 
     public void SetVoiceInputMode(bool enabled)
     {
+        if (voiceInputMode == enabled)
+        {
+            return;
+        }
+
         voiceInputMode = enabled;
+        if (voiceInputMode)
+        {
+            StartVoiceInput();
+        }
+        else
+        {
+            StopVoiceInput();
+        }
     }
 
     public void ToggleMusic()
@@ -545,15 +586,467 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         UserTextSubmitted?.Invoke(text);
     }
 
+    private void StartVoiceInput()
+    {
+        if (voiceInputCoroutine != null)
+        {
+            return;
+        }
+
+        voiceInputCoroutine = StartCoroutine(VoiceInputRoutine());
+    }
+
+    private void StopVoiceInput()
+    {
+        voiceInputMode = false;
+
+        if (voiceInputCoroutine != null)
+        {
+            StopCoroutine(voiceInputCoroutine);
+            voiceInputCoroutine = null;
+        }
+
+        if (!string.IsNullOrEmpty(microphoneDevice) && Microphone.IsRecording(microphoneDevice))
+        {
+            Microphone.End(microphoneDevice);
+        }
+
+        microphoneClip = null;
+        microphoneDevice = "";
+        microphoneReadPosition = 0;
+        microphoneCaptureSampleRate = 0;
+    }
+
+    private IEnumerator VoiceInputRoutine()
+    {
+        CacheSocketClient();
+
+#if UNITY_ANDROID || UNITY_IOS || UNITY_WEBGL
+        if (!Application.HasUserAuthorization(UserAuthorization.Microphone))
+        {
+            yield return Application.RequestUserAuthorization(UserAuthorization.Microphone);
+        }
+
+        if (!Application.HasUserAuthorization(UserAuthorization.Microphone))
+        {
+            Debug.LogWarning("Microphone permission denied.", this);
+            StopVoiceInput();
+            yield break;
+        }
+#endif
+
+        if (Microphone.devices == null || Microphone.devices.Length == 0)
+        {
+            Debug.LogWarning("No microphone device found.", this);
+            StopVoiceInput();
+            yield break;
+        }
+
+        microphoneDevice = Microphone.devices[0];
+        var requestedCaptureRate = Mathf.Max(8000, voiceInputSampleRate);
+        Microphone.GetDeviceCaps(microphoneDevice, out var minimumCaptureRate, out var maximumCaptureRate);
+        if (minimumCaptureRate > 0 && maximumCaptureRate >= minimumCaptureRate)
+        {
+            requestedCaptureRate = Mathf.Clamp(requestedCaptureRate, minimumCaptureRate, maximumCaptureRate);
+        }
+
+        var clipLengthSeconds = Mathf.CeilToInt(Mathf.Max(3f, voiceInputMaxRecordSeconds + voiceInputSilenceDuration + 2f));
+        microphoneClip = Microphone.Start(microphoneDevice, true, clipLengthSeconds, requestedCaptureRate);
+        microphoneReadPosition = 0;
+        if (microphoneClip == null)
+        {
+            Debug.LogWarning("Microphone.Start returned no AudioClip. device=\"" + microphoneDevice + "\", requestedRate=" + requestedCaptureRate, this);
+            StopVoiceInput();
+            yield break;
+        }
+
+        var microphoneStartupDeadline = Time.realtimeSinceStartup + Mathf.Max(1f, voiceInputStartupTimeoutSeconds);
+        while (voiceInputMode &&
+               Microphone.GetPosition(microphoneDevice) <= 0 &&
+               Time.realtimeSinceStartup < microphoneStartupDeadline)
+        {
+            yield return null;
+        }
+
+        if (!voiceInputMode)
+        {
+            yield break;
+        }
+
+        if (Microphone.GetPosition(microphoneDevice) <= 0)
+        {
+            Debug.LogWarning("Microphone did not start before timeout. device=\"" + microphoneDevice + "\", requestedRate=" + requestedCaptureRate, this);
+            StopVoiceInput();
+            yield break;
+        }
+
+        microphoneCaptureSampleRate = Mathf.Max(8000, microphoneClip.frequency);
+        Debug.Log("Voice input ready. device=\"" + microphoneDevice + "\", captureRate=" + microphoneCaptureSampleRate, this);
+
+        var frameSamples = Mathf.Max(1, Mathf.RoundToInt(microphoneCaptureSampleRate * Mathf.Max(0.02f, voiceInputCheckIntervalSeconds)));
+        var silenceFramesToEnd = Mathf.Max(1, Mathf.CeilToInt(voiceInputSilenceDuration / Mathf.Max(0.02f, voiceInputCheckIntervalSeconds)));
+        var speechFramesToStart = Mathf.Max(1, voiceInputSpeechStartFrames);
+        var thresholdScale = Application.isMobilePlatform
+            ? Mathf.Clamp(mobileVoiceInputThresholdScale, 0.05f, 1f)
+            : 1f;
+        var speechStartThreshold = Mathf.Max(0.0001f, voiceInputStartThreshold * thresholdScale);
+        var silenceThreshold = Mathf.Max(0.0001f, voiceInputSilenceThreshold * thresholdScale);
+        var preBufferFrameLimit = Mathf.Max(0, voiceInputPreBufferFrames);
+        var preBuffer = new Queue<float[]>();
+        var recorded = new List<float>();
+        var speechStarted = false;
+        var silentFrames = 0;
+        var speechFrames = 0;
+        var recordStartedAt = 0f;
+
+        while (voiceInputMode)
+        {
+            if (microphoneClip == null || !Microphone.IsRecording(microphoneDevice))
+            {
+                break;
+            }
+
+            if (!TryReadMicrophoneFrame(frameSamples, out var frame))
+            {
+                yield return null;
+                continue;
+            }
+
+            var frameMean = GetMeanAbs(frame);
+            if (!speechStarted)
+            {
+                if (preBufferFrameLimit > 0)
+                {
+                    preBuffer.Enqueue(frame);
+                    while (preBuffer.Count > preBufferFrameLimit)
+                    {
+                        preBuffer.Dequeue();
+                    }
+                }
+
+                if (frameMean >= speechStartThreshold)
+                {
+                    speechFrames++;
+                }
+                else
+                {
+                    speechFrames = 0;
+                }
+
+                if (speechFrames >= speechFramesToStart)
+                {
+                    speechStarted = true;
+                    recordStartedAt = Time.realtimeSinceStartup;
+                    foreach (var bufferedFrame in preBuffer)
+                    {
+                        recorded.AddRange(bufferedFrame);
+                    }
+
+                    preBuffer.Clear();
+                    silentFrames = 0;
+                }
+
+                continue;
+            }
+
+            recorded.AddRange(frame);
+
+            if (frameMean < silenceThreshold)
+            {
+                silentFrames++;
+            }
+            else
+            {
+                silentFrames = 0;
+            }
+
+            var recordSeconds = recorded.Count / (float)(microphoneCaptureSampleRate * Mathf.Max(1, microphoneClip.channels));
+            if (silentFrames >= silenceFramesToEnd || Time.realtimeSinceStartup - recordStartedAt >= voiceInputMaxRecordSeconds)
+            {
+                if (recordSeconds >= voiceInputMinRecordSeconds)
+                {
+                    yield return SubmitVoiceInputRoutine(
+                        recorded.ToArray(),
+                        Mathf.Max(1, microphoneClip.channels),
+                        microphoneCaptureSampleRate);
+                }
+
+                recorded.Clear();
+                preBuffer.Clear();
+                speechStarted = false;
+                silentFrames = 0;
+                speechFrames = 0;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(microphoneDevice) && Microphone.IsRecording(microphoneDevice))
+        {
+            Microphone.End(microphoneDevice);
+        }
+
+        microphoneClip = null;
+        microphoneDevice = "";
+        microphoneReadPosition = 0;
+        microphoneCaptureSampleRate = 0;
+        voiceInputMode = false;
+        voiceInputCoroutine = null;
+    }
+
+    private bool TryReadMicrophoneFrame(int frameSamples, out float[] frame)
+    {
+        frame = null;
+        if (microphoneClip == null || string.IsNullOrEmpty(microphoneDevice))
+        {
+            return false;
+        }
+
+        var currentPosition = Microphone.GetPosition(microphoneDevice);
+        if (currentPosition < 0)
+        {
+            return false;
+        }
+
+        var totalSamples = microphoneClip.samples;
+        var available = currentPosition >= microphoneReadPosition
+            ? currentPosition - microphoneReadPosition
+            : totalSamples - microphoneReadPosition + currentPosition;
+        if (available < frameSamples)
+        {
+            return false;
+        }
+
+        var channels = Mathf.Max(1, microphoneClip.channels);
+        frame = new float[frameSamples * channels];
+        if (microphoneReadPosition + frameSamples <= totalSamples)
+        {
+            microphoneClip.GetData(frame, microphoneReadPosition);
+        }
+        else
+        {
+            var firstSamples = totalSamples - microphoneReadPosition;
+            var first = new float[firstSamples * channels];
+            var second = new float[(frameSamples - firstSamples) * channels];
+            microphoneClip.GetData(first, microphoneReadPosition);
+            microphoneClip.GetData(second, 0);
+            Array.Copy(first, 0, frame, 0, first.Length);
+            Array.Copy(second, 0, frame, first.Length, second.Length);
+        }
+
+        microphoneReadPosition = (microphoneReadPosition + frameSamples) % totalSamples;
+        return true;
+    }
+
+    private IEnumerator SubmitVoiceInputRoutine(float[] samples, int channels, int sourceSampleRate)
+    {
+        CacheSocketClient();
+        if (socketClient == null)
+        {
+            Debug.LogWarning("Socket.IO client is unavailable; cannot submit STT audio.", this);
+            if (submitPlaceholderOnVoiceInputFailure)
+            {
+                SubmitUserText(emptyVoiceInputText);
+            }
+            yield break;
+        }
+
+        var monoSamples = ToMonoSamples(samples, channels);
+        monoSamples = ResampleMono(monoSamples, sourceSampleRate, voiceInputSampleRate);
+        var pcm16Audio = FloatSamplesToPcm16Bytes(monoSamples);
+        var requestFinished = false;
+        var recognizedText = "";
+        var requestError = "";
+        socketClient.SendSpeechRecognitionRequest(
+            pcm16Audio,
+            voiceInputSampleRate,
+            text =>
+            {
+                recognizedText = text;
+                requestFinished = true;
+            },
+            error =>
+            {
+                requestError = error;
+                requestFinished = true;
+            });
+
+        while (!requestFinished)
+        {
+            yield return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(requestError))
+        {
+            Debug.LogWarning("STT request failed: " + requestError, this);
+            if (submitPlaceholderOnVoiceInputFailure)
+            {
+                SubmitUserText(emptyVoiceInputText);
+            }
+            yield break;
+        }
+
+        SubmitUserText(string.IsNullOrWhiteSpace(recognizedText) ? emptyVoiceInputText : recognizedText);
+    }
+
     public void ReceiveAiAnswer(string answer)
     {
+        if (TryParseModelReply(answer, out var reply))
+        {
+            ReceiveParsedAiAnswer(reply.content, reply.expression);
+            return;
+        }
 
         ParseOldTemplateAnswer(answer, out var cnText, out var mood, out var expression, out _);
-        SetDisplayedText(cnText);
-        pendingExpressionName = expression;
-        SetMood(mood, expression);
-       
+        ReceiveParsedAiAnswer(cnText, expression);
     }
+
+    public void ReceiveParsedAiAnswer(string content, string expression)
+    {
+        SetDisplayedText(content);
+        pendingExpressionName = NormalizeMoodText(expression);
+    }
+
+    private static float GetMeanAbs(float[] samples)
+    {
+        if (samples == null || samples.Length == 0)
+        {
+            return 0f;
+        }
+
+        var sum = 0f;
+        for (var i = 0; i < samples.Length; i++)
+        {
+            sum += Mathf.Abs(samples[i]);
+        }
+
+        return sum / samples.Length;
+    }
+
+    private static float[] ToMonoSamples(float[] samples, int channels)
+    {
+        if (samples == null || samples.Length == 0)
+        {
+            return Array.Empty<float>();
+        }
+
+        channels = Mathf.Max(1, channels);
+        if (channels == 1)
+        {
+            return samples;
+        }
+
+        var frameCount = samples.Length / channels;
+        var mono = new float[frameCount];
+        for (var frame = 0; frame < frameCount; frame++)
+        {
+            var sum = 0f;
+            var baseIndex = frame * channels;
+            for (var channel = 0; channel < channels; channel++)
+            {
+                sum += samples[baseIndex + channel];
+            }
+
+            mono[frame] = sum / channels;
+        }
+
+        return mono;
+    }
+
+    private static byte[] FloatSamplesToPcm16Bytes(float[] samples)
+    {
+        if (samples == null || samples.Length == 0)
+        {
+            return Array.Empty<byte>();
+        }
+
+        var bytes = new byte[samples.Length * sizeof(short)];
+        for (var i = 0; i < samples.Length; i++)
+        {
+            var value = (short)Mathf.RoundToInt(Mathf.Clamp(samples[i], -1f, 1f) * 32767f);
+            bytes[i * 2] = (byte)(value & 0xff);
+            bytes[i * 2 + 1] = (byte)((value >> 8) & 0xff);
+        }
+
+        return bytes;
+    }
+
+    private static float[] ResampleMono(float[] samples, int sourceSampleRate, int targetSampleRate)
+    {
+        if (samples == null || samples.Length == 0)
+        {
+            return Array.Empty<float>();
+        }
+
+        sourceSampleRate = Mathf.Max(1, sourceSampleRate);
+        targetSampleRate = Mathf.Max(1, targetSampleRate);
+        if (sourceSampleRate == targetSampleRate)
+        {
+            return samples;
+        }
+
+        var outputLength = Mathf.Max(1, Mathf.RoundToInt(samples.Length * (targetSampleRate / (float)sourceSampleRate)));
+        var output = new float[outputLength];
+        var sourceStep = sourceSampleRate / (float)targetSampleRate;
+        for (var i = 0; i < outputLength; i++)
+        {
+            var sourcePosition = Mathf.Min(samples.Length - 1, i * sourceStep);
+            var lowerIndex = Mathf.FloorToInt(sourcePosition);
+            var upperIndex = Mathf.Min(samples.Length - 1, lowerIndex + 1);
+            output[i] = Mathf.Lerp(samples[lowerIndex], samples[upperIndex], sourcePosition - lowerIndex);
+        }
+
+        return output;
+    }
+
+    private static bool TryParseModelReply(string answer, out ModelReply reply)
+    {
+        reply = null;
+        if (string.IsNullOrWhiteSpace(answer))
+        {
+            return false;
+        }
+
+        try
+        {
+            var payload = Newtonsoft.Json.Linq.JObject.Parse(answer.Trim());
+            var action = (payload.SelectToken("action")?.ToString() ?? "reply").Trim();
+            if (!string.Equals(action, "reply", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var content = (payload.SelectToken("cn") ?? payload.SelectToken("content"))?.ToString()?.Trim() ?? "";
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                return false;
+            }
+
+            reply = new ModelReply
+            {
+                action = "reply",
+                content = content,
+                cn = content,
+                mood = NormalizeMoodText(payload.SelectToken("mood")?.ToString()),
+                expression = NormalizeMoodText(payload.SelectToken("expression")?.ToString())
+            };
+
+            if (string.IsNullOrWhiteSpace(reply.mood))
+            {
+                reply.mood = "normal";
+            }
+
+            if (string.IsNullOrWhiteSpace(reply.expression))
+            {
+                reply.expression = "normal";
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public void SetUserSpeakingStatus()
     {
         lastSpeakTime=Time.time;
@@ -565,13 +1058,6 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         if (!string.IsNullOrEmpty(text))
         {
             SetDisplayedText(text);
-        }
-
-        if (!string.IsNullOrEmpty(mood))
-        {
-            var expression = pendingExpressionName;
-            pendingExpressionName = "";
-            SetMood(mood, expression);
         }
 
         if (voiceSource == null || clip == null)
@@ -588,6 +1074,14 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
 
             return;
         }
+
+        if (!string.IsNullOrEmpty(mood))
+        {
+            var expression = pendingExpressionName;
+            pendingExpressionName = "";
+            SetMood(mood, expression);
+        }
+
         SetUserSpeakingStatus();
         voiceSource.clip = clip;
         PrepareVoiceMouthTimeline(clip);
@@ -610,6 +1104,132 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         Speak(clip, clip.name, currentMood, playMoodMotion: false);
     }
 
+    public IEnumerator LoadMoodExpressionConfiguration()
+    {
+        if (moodExpressionConfigurationLoaded)
+        {
+            yield break;
+        }
+
+        if (moodExpressionConfigurationLoading)
+        {
+            while (moodExpressionConfigurationLoading)
+            {
+                yield return null;
+            }
+
+            yield break;
+        }
+
+        moodExpressionConfigurationLoading = true;
+        availableMoodNames.Clear();
+        availableExpressionNames.Clear();
+        expressionEffects.Clear();
+
+        List<string> voiceReferenceFiles = null;
+        yield return DesktopPetResourcePath.ListPackagedModelFolderFiles(
+            voiceReferenceFolder,
+            files => voiceReferenceFiles = files);
+
+        if (voiceReferenceFiles != null)
+        {
+            for (var i = 0; i < voiceReferenceFiles.Count; i++)
+            {
+                var path = voiceReferenceFiles[i];
+                if (GetAudioType(path) == AudioType.UNKNOWN)
+                {
+                    continue;
+                }
+
+                AddUniqueName(availableMoodNames, GetAudioDisplayName(path));
+            }
+        }
+
+        var expressionConfigText = "";
+        yield return LoadModelText(expressionEffectConfigPath, text => expressionConfigText = text);
+        if (!string.IsNullOrWhiteSpace(expressionConfigText))
+        {
+            try
+            {
+                var root = Newtonsoft.Json.Linq.JObject.Parse(expressionConfigText);
+                var expressions = root.SelectToken("expressions") as Newtonsoft.Json.Linq.JObject;
+                if (expressions != null)
+                {
+                    foreach (var property in expressions.Properties())
+                    {
+                        var name = (property.Name ?? "").Trim();
+                        if (string.IsNullOrWhiteSpace(name))
+                        {
+                            continue;
+                        }
+
+                        var value = property.Value as Newtonsoft.Json.Linq.JObject;
+                        expressionEffects[name] = new ExpressionEffect
+                        {
+                            mouthOpen = Mathf.Clamp01(value?.SelectToken("mouth_open")?.ToObject<float>() ?? 0.5f),
+                            shakeRange = value?.SelectToken("shake")?.ToObject<float>() ?? 0f
+                        };
+                        AddUniqueName(availableExpressionNames, name);
+                    }
+                }
+
+                var parameterIds = root.SelectToken("paramID") as Newtonsoft.Json.Linq.JObject;
+                var configuredMouthParameter = parameterIds?.SelectToken("mouthParam")?.ToString()?.Trim();
+                var configuredShakeParameter = parameterIds?.SelectToken("shakeParam")?.ToString()?.Trim();
+                if (!string.IsNullOrWhiteSpace(configuredMouthParameter))
+                {
+                    mouthOpenParameter = configuredMouthParameter;
+                }
+
+                if (!string.IsNullOrWhiteSpace(configuredShakeParameter))
+                {
+                    bodyAngleZParameter = configuredShakeParameter;
+                }
+            }
+            catch (Exception exc)
+            {
+                Debug.LogWarning("Failed to parse expression effect config: " + exc.Message, this);
+            }
+        }
+
+        moodExpressionConfigurationLoaded = true;
+        moodExpressionConfigurationLoading = false;
+
+        if (availableMoodNames.Count == 0)
+        {
+            Debug.LogWarning("Voice reference folder has no audio files: " + voiceReferenceFolder, this);
+        }
+
+        if (availableExpressionNames.Count == 0)
+        {
+            Debug.LogWarning("Expression effect config has no expressions: " + expressionEffectConfigPath, this);
+        }
+    }
+
+    private IEnumerator LoadModelText(string relativePath, Action<string> onLoaded)
+    {
+        var path = "";
+        yield return DesktopPetResourcePath.EnsureWritableModelFile(relativePath, false, readyPath => path = readyPath);
+        if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+        {
+            onLoaded?.Invoke(File.ReadAllText(path, System.Text.Encoding.UTF8));
+            yield break;
+        }
+
+        var text = "";
+        yield return DesktopPetResourcePath.ReadPackagedModelText(relativePath, loaded => text = loaded);
+        onLoaded?.Invoke(text);
+    }
+
+    private static void AddUniqueName(List<string> names, string value)
+    {
+        value = (value ?? "").Trim();
+        if (!string.IsNullOrWhiteSpace(value) && !names.Contains(value))
+        {
+            names.Add(value);
+        }
+    }
+
     public void SetMood(string mood)
     {
         SetMood(mood, "");
@@ -624,15 +1244,26 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         }
 
         currentMood = mood;
-        var profile = GetMoodProfile(mood);
         expressionOverride = NormalizeMoodText(expressionOverride);
-        var expressionName = string.IsNullOrWhiteSpace(expressionOverride) ? profile.expressionName : expressionOverride;
-        if (!ApplyExpression(expressionName))
+        currentExpression = !string.IsNullOrWhiteSpace(expressionOverride)
+            ? expressionOverride
+            : expressionEffects.ContainsKey(mood) ? mood : "normal";
+        if (!ApplyExpression(currentExpression))
         {
-            Debug.LogWarning("Mood expression not found. mood=\"" + mood + "\", expression=\"" + expressionName + "\".", this);
+            Debug.LogWarning("Mood expression not found. mood=\"" + mood + "\", expression=\"" + currentExpression + "\".", this);
         }
 
         MoodChanged?.Invoke(currentMood);
+    }
+
+    public string[] GetAvailableMoodNames()
+    {
+        return availableMoodNames.ToArray();
+    }
+
+    public string[] GetAvailableExpressionNames()
+    {
+        return availableExpressionNames.ToArray();
     }
 
     private void CacheComponents()
@@ -677,6 +1308,29 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         if (neteaseMusicClient == null)
         {
             neteaseMusicClient = GetComponentInChildren<NeteaseCloudMusicClient>();
+        }
+    }
+
+    private void CacheSocketClient()
+    {
+        if (socketClient == null)
+        {
+            socketClient = GetComponent<DesktopPetSocketIOClient>();
+        }
+
+        if (socketClient == null)
+        {
+            socketClient = GetComponentInParent<DesktopPetSocketIOClient>();
+        }
+
+        if (socketClient == null)
+        {
+            socketClient = GetComponentInChildren<DesktopPetSocketIOClient>();
+        }
+
+        if (socketClient == null)
+        {
+            socketClient = FindFirstObjectByType<DesktopPetSocketIOClient>();
         }
     }
 
@@ -1503,13 +2157,13 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         }
 
         var react = GetVoiceMouthReaction();
-        var mouthValue = Mathf.Clamp01(react * GetMoodProfile(currentMood).mouthOpen);
+        var mouthValue = Mathf.Clamp01(react * GetExpressionEffect(currentExpression).mouthOpen);
         SetParameter(mouthOpenParameter, mouthValue);
     }
 
     private void UpdateMoodShake()
     {
-        var profile = GetMoodProfile(currentMood);
+        var profile = GetExpressionEffect(currentExpression);
         var parameter = FindParameter(bodyAngleZParameter);
         if (parameter == null)
         {
@@ -1767,31 +2421,29 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
 
     private void StartMoodMotion(float seconds)
     {
-        var profile = GetMoodProfile(currentMood);
+        var profile = GetExpressionEffect(currentExpression);
         if (profile.shakeRange > 0f && seconds > 3f)
         {
             bodyShakeDirection = 1f;
             shakeUntil = Time.time + seconds;
-            Debug.Log("Mood body shake started. mood=\"" + currentMood + "\", range=" + profile.shakeRange + ", seconds=" + seconds.ToString("0.00"), this);
+            Debug.Log("Expression body shake started. expression=\"" + currentExpression + "\", range=" + profile.shakeRange + ", seconds=" + seconds.ToString("0.00"), this);
         }
     }
 
-    private MoodProfile GetMoodProfile(string mood)
+    private ExpressionEffect GetExpressionEffect(string expression)
     {
-        mood = NormalizeMoodText(mood);
-        if (moodProfiles != null)
+        expression = NormalizeMoodText(expression);
+        if (!string.IsNullOrWhiteSpace(expression) && expressionEffects.TryGetValue(expression, out var effect))
         {
-            for (var i = 0; i < moodProfiles.Length; i++)
-            {
-                if (moodProfiles[i] != null &&
-                    string.Equals(NormalizeMoodText(moodProfiles[i].mood), mood, StringComparison.OrdinalIgnoreCase))
-                {
-                    return moodProfiles[i];
-                }
-            }
+            return effect;
         }
 
-        return new MoodProfile { mood = mood, expressionName = mood, mouthOpen = 0.6f, shakeRange = 0f };
+        if (expressionEffects.TryGetValue("normal", out var normalEffect))
+        {
+            return normalEffect;
+        }
+
+        return new ExpressionEffect();
     }
 
     private static void ParseOldTemplateAnswer(string answer, out string cnText, out string mood, out string expression, out string jaText)
@@ -1823,13 +2475,7 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
 
     private static string NormalizeMoodText(string mood)
     {
-        mood = (mood ?? "").Trim().Trim('*').Trim();
-        if (string.Equals(mood, "\u5F7B\u5E95\u9ED1\u5316", StringComparison.OrdinalIgnoreCase))
-        {
-            return "\u5F7B\u5E95\u574F\u6389";
-        }
-
-        return string.Equals(mood, "\u59D4\u5C48\u60F3\u54ED", StringComparison.OrdinalIgnoreCase) ? "sad" : mood;
+        return (mood ?? "").Trim().Trim('*').Trim();
     }
 
     private static string StripExpressionExtension(string expressionName)
@@ -1895,6 +2541,13 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         {
             AddExpressionCandidate(candidates, "expression17");
             AddExpressionCandidate(candidates, "expression17.exp3");
+            return;
+        }
+
+        if (string.Equals(mood, "委屈想哭", StringComparison.OrdinalIgnoreCase))
+        {
+            AddExpressionCandidate(candidates, "委屈");
+            AddExpressionCandidate(candidates, "委屈.exp3");
         }
     }
 

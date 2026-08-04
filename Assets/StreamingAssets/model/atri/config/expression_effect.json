@@ -1,0 +1,51 @@
+{
+    "expressions":
+    {
+        "shy": {
+            "mouth_open": 0.3,
+            "shake": 2
+        },
+        "happy": {
+            "mouth_open": 0.8,
+            "shake": 8
+        },
+        "得意": {
+            "mouth_open": 0.8,
+            "shake": 8
+        },
+        "sad": {
+            "mouth_open": 0.4,
+            "shake": 0
+        },
+        "normal": {
+            "mouth_open": 0.6,
+            "shake": 0
+        },
+        "confuse": {
+            "mouth_open": 0.6,
+            "shake": 0
+        },
+        "气急败坏": {
+            "mouth_open": 0.8,
+            "shake": 0
+        },
+        "赌气": {
+            "mouth_open": 0.8,
+            "shake": 0
+        },
+        "委屈想哭": {
+            "mouth_open": 0.3,
+            "shake": 0
+        },
+        "彻底坏掉": {
+            "mouth_open": 0.3,
+            "shake": 0
+        }
+    },
+    "paramID":
+    {
+        "mouthParam":"ParamMouthOpenY",
+        "shakeParam":"ParamBodyAngleZ"
+    }
+    
+}

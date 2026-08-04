@@ -1,0 +1,10 @@
+config/voice_refs/confuse.wav
+config/voice_refs/happy.wav
+config/voice_refs/normal.wav
+config/voice_refs/sad.wav
+config/voice_refs/shy.wav
+config/voice_refs/彻底坏掉.wav
+config/voice_refs/得意.wav
+config/voice_refs/悄悄话.wav
+config/voice_refs/气急败坏.wav
+config/voice_refs/赌气.wav
