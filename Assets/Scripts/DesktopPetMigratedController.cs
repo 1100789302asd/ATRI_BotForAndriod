@@ -51,6 +51,7 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     [SerializeField] private AudioSource voiceSource;
     [SerializeField] private AudioSource musicSource;
     [SerializeField] private NeteaseCloudMusicClient neteaseMusicClient;
+    [SerializeField] private DesktopPetServerConfig serverConfig;
     [SerializeField] private AudioClip[] prefabVoiceClips;
     [SerializeField] private AudioClip[] musicClips;
     [SerializeField] private bool keepUnityAudioAliveInBackground = true;
@@ -61,6 +62,14 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     [SerializeField] private string initMusicFolder = "init_musics";
     [SerializeField] private float musicVolume = 0.2f;
     [SerializeField] private bool randomizeInitialMusic = true;
+
+    [Header("Voice Balance")]
+    [SerializeField] private bool normalizeVoicePlayback = true;
+    [SerializeField] private float voiceTargetPeak = 0.85f;
+    [SerializeField] private float maxVoiceGain = 3f;
+    [SerializeField] private bool duckMusicDuringVoice = true;
+    [SerializeField] private float musicDuckMultiplierDuringVoice = 0.25f;
+    [SerializeField] private float musicDuckRestoreDelaySeconds = 0.15f;
 
     [Header("Mood")]
     [SerializeField] private string currentMood = "happy";
@@ -148,10 +157,14 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     private bool moodExpressionConfigurationLoading;
     private readonly List<string> recentUnityLogs = new List<string>();
     private Coroutine voiceInputCoroutine;
+    private Coroutine musicDuckCoroutine;
     private AudioClip microphoneClip;
+    private AudioClip activeBoostedVoiceClip;
     private string microphoneDevice = "";
     private int microphoneReadPosition;
     private int microphoneCaptureSampleRate;
+    private bool musicDuckedForVoice;
+    private float musicVolumeBeforeVoiceDuck;
 
     public bool HasUpdateController { get; set; }
 
@@ -232,12 +245,14 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     {
         CacheComponents();
         CacheSocketClient();
+        CacheServerConfig();
     }
 
     private void Awake()
     {
         CacheComponents();
         CacheSocketClient();
+        CacheServerConfig();
         Application.runInBackground = true;
         AudioListener.pause = false;
         ConfigureAudioSourcesForBackground();
@@ -250,6 +265,7 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         HookUnityLogFile();
         CacheComponents();
         CacheSocketClient();
+        CacheServerConfig();
         HasUpdateController = GetComponent<CubismUpdateController>() != null;
         RefreshCubismUpdateController();
     }
@@ -257,6 +273,8 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     private void OnDisable()
     {
         StopVoiceInput();
+        RestoreMusicVolumeAfterVoice();
+        ReleaseBoostedVoiceClip();
         UnhookUnityLogFile();
     }
 
@@ -1082,13 +1100,16 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
             SetMood(mood, expression);
         }
 
+        var playbackClip = PrepareVoiceClipForPlayback(clip);
         SetUserSpeakingStatus();
-        voiceSource.clip = clip;
-        PrepareVoiceMouthTimeline(clip);
+        voiceSource.clip = playbackClip;
+        voiceSource.volume = 1f;
+        PrepareVoiceMouthTimeline(playbackClip);
         voiceSource.Play();
+        BeginVoiceMusicDucking();
         if (playMoodMotion)
         {
-            StartMoodMotion(clip.length);
+            StartMoodMotion(playbackClip.length);
         }
     }
 
@@ -1102,6 +1123,143 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         var clip = prefabVoiceClips[prefabVoiceIndex];
         prefabVoiceIndex = (prefabVoiceIndex + 1) % prefabVoiceClips.Length;
         Speak(clip, clip.name, currentMood, playMoodMotion: false);
+    }
+
+    private AudioClip PrepareVoiceClipForPlayback(AudioClip clip)
+    {
+        ReleaseBoostedVoiceClip();
+        if (!normalizeVoicePlayback || clip == null || clip.samples <= 0 || clip.channels <= 0)
+        {
+            return clip;
+        }
+
+        try
+        {
+            var channels = Mathf.Max(1, clip.channels);
+            var samples = new float[clip.samples * channels];
+            if (!clip.GetData(samples, 0))
+            {
+                return clip;
+            }
+
+            var peak = 0f;
+            for (var i = 0; i < samples.Length; i++)
+            {
+                peak = Mathf.Max(peak, Mathf.Abs(samples[i]));
+            }
+
+            if (peak <= 0.0001f)
+            {
+                return clip;
+            }
+
+            var targetPeak = Mathf.Clamp(voiceTargetPeak, 0.1f, 0.98f);
+            var gain = Mathf.Min(Mathf.Max(1f, maxVoiceGain), targetPeak / peak);
+            if (gain <= 1.01f)
+            {
+                return clip;
+            }
+
+            for (var i = 0; i < samples.Length; i++)
+            {
+                samples[i] = Mathf.Clamp(samples[i] * gain, -0.98f, 0.98f);
+            }
+
+            activeBoostedVoiceClip = AudioClip.Create(
+                clip.name + "_boosted",
+                clip.samples,
+                channels,
+                clip.frequency,
+                false);
+            if (!activeBoostedVoiceClip.SetData(samples, 0))
+            {
+                ReleaseBoostedVoiceClip();
+                return clip;
+            }
+
+            return activeBoostedVoiceClip;
+        }
+        catch (Exception exc)
+        {
+            Debug.LogWarning("Failed to boost voice clip volume: " + exc.Message, this);
+            ReleaseBoostedVoiceClip();
+            return clip;
+        }
+    }
+
+    private void BeginVoiceMusicDucking()
+    {
+        if (!duckMusicDuringVoice || musicSource == null)
+        {
+            return;
+        }
+
+        if (!musicDuckedForVoice)
+        {
+            musicVolumeBeforeVoiceDuck = musicSource.volume;
+            musicDuckedForVoice = true;
+        }
+
+        var multiplier = Mathf.Clamp01(musicDuckMultiplierDuringVoice);
+        musicSource.volume = Mathf.Clamp01(musicVolumeBeforeVoiceDuck * multiplier);
+
+        if (musicDuckCoroutine != null)
+        {
+            StopCoroutine(musicDuckCoroutine);
+        }
+
+        musicDuckCoroutine = StartCoroutine(RestoreMusicVolumeAfterVoiceRoutine());
+    }
+
+    private IEnumerator RestoreMusicVolumeAfterVoiceRoutine()
+    {
+        while (voiceSource != null && voiceSource.isPlaying)
+        {
+            yield return null;
+        }
+
+        var delay = Mathf.Max(0f, musicDuckRestoreDelaySeconds);
+        if (delay > 0f)
+        {
+            yield return new WaitForSecondsRealtime(delay);
+        }
+
+        musicDuckCoroutine = null;
+        RestoreMusicVolumeAfterVoice();
+        ReleaseBoostedVoiceClip();
+    }
+
+    private void RestoreMusicVolumeAfterVoice()
+    {
+        if (musicDuckCoroutine != null)
+        {
+            StopCoroutine(musicDuckCoroutine);
+            musicDuckCoroutine = null;
+        }
+
+        if (musicDuckedForVoice && musicSource != null)
+        {
+            musicSource.volume = Mathf.Clamp01(musicVolumeBeforeVoiceDuck);
+        }
+
+        musicDuckedForVoice = false;
+        musicVolumeBeforeVoiceDuck = 0f;
+    }
+
+    private void ReleaseBoostedVoiceClip()
+    {
+        if (activeBoostedVoiceClip == null)
+        {
+            return;
+        }
+
+        if (voiceSource != null && voiceSource.clip == activeBoostedVoiceClip)
+        {
+            voiceSource.clip = null;
+        }
+
+        Destroy(activeBoostedVoiceClip);
+        activeBoostedVoiceClip = null;
     }
 
     public IEnumerator LoadMoodExpressionConfiguration()
@@ -1331,6 +1489,29 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
         if (socketClient == null)
         {
             socketClient = FindFirstObjectByType<DesktopPetSocketIOClient>();
+        }
+    }
+
+    private void CacheServerConfig()
+    {
+        if (serverConfig == null)
+        {
+            serverConfig = GetComponent<DesktopPetServerConfig>();
+        }
+
+        if (serverConfig == null)
+        {
+            serverConfig = GetComponentInParent<DesktopPetServerConfig>();
+        }
+
+        if (serverConfig == null)
+        {
+            serverConfig = GetComponentInChildren<DesktopPetServerConfig>();
+        }
+
+        if (serverConfig == null)
+        {
+            serverConfig = FindFirstObjectByType<DesktopPetServerConfig>();
         }
     }
 
@@ -2052,6 +2233,11 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
             return;
         }
 
+        if (!CanInteractWithBodyParts())
+        {
+            return;
+        }
+
         var screenPosition = GetPointerScreenPosition();
         if (useCustomHitAreas && TryHandleCustomHitArea(screenPosition))
         {
@@ -2323,6 +2509,12 @@ public sealed class DesktopPetMigratedController : MonoBehaviour, ICubismUpdatab
     private bool ShouldRouteMusicToNetease()
     {
         return neteaseMusicClient != null && neteaseMusicClient.CanHandleMusic;
+    }
+
+    private bool CanInteractWithBodyParts()
+    {
+        CacheServerConfig();
+        return serverConfig == null || !serverConfig.AppAuthRequired || serverConfig.HasAppAuth;
     }
 
     private void ApplyLive2DParameters()

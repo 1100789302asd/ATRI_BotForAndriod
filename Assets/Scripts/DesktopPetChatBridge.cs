@@ -5,6 +5,7 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.Events;
+using UnityEngine.Networking;
 using UnityEngine.UI;
 
 /// <summary>
@@ -28,6 +29,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     {
         public ChatEnvelope[] data;
         public string username;
+        public string token;
         public string model_name;
         public string pet_id;
         public string special;
@@ -37,6 +39,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     public sealed class HistoryServerPayload
     {
         public string username;
+        public string token;
         public string model_name;
         public string pet_id;
         public string special;
@@ -50,6 +53,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     {
         public ChatEnvelope[] data;
         public string username;
+        public string token;
         public string model_name;
         public string pet_id;
         public string special;
@@ -72,6 +76,23 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         public string mood;
         public string expression;
         public bool rawTextFallback;
+    }
+
+    [Serializable]
+    private sealed class AuthRequestPayload
+    {
+        public string username;
+        public string password;
+        public string token;
+    }
+
+    [Serializable]
+    public sealed class AuthResponsePayload
+    {
+        public string username = "";
+        public string token = "";
+        public string error = "";
+        public bool valid;
     }
 
     [Serializable]
@@ -104,8 +125,9 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     [SerializeField] private bool emitSocketRequestEvent = true;
     [SerializeField] private string getAnswerEventName = "get_answer";
     [SerializeField] private string username = "";
+    [SerializeField] private string authToken = "";
     [SerializeField] private string petId = "atri";
-    [SerializeField] private string modelName = "gpt";
+    [SerializeField] private string modelName = "deepseek";
 
     public string ModelName
     {
@@ -178,6 +200,14 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
     private string summaryHistorySaveError = "";
     private string pendingAiLogRole = "";
     private string pendingAiLogText = "";
+    private bool appAuthChoiceAnswered;
+    private bool appAuthRequestInProgress;
+    private GameObject appAuthDialog;
+    private InputField appAuthUsernameInput;
+    private InputField appAuthPasswordInput;
+    private Text appAuthFeedbackText;
+    private Button appAuthLoginButton;
+    private Button appAuthRegisterButton;
     private bool memoryStorageChoiceAnswered;
     private GameObject memoryStorageChoiceDialog;
 
@@ -237,6 +267,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         dialogueHistory.Clear();
 
         yield return LoadPresetHistory();
+        yield return EnsureAppAuthReady();
         yield return EnsureMemoryStorageModeSelected();
         yield return LoadSummaryHistory();
         yield return LoadDialogueHistory();
@@ -607,7 +638,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
 
         UserTextReceived?.Invoke(text);
         AddHistory("user", text);
-        AddChatLogMessage("superpai", text);
+        AddChatLogMessage(GetUserChatLogLabel(), text);
         WaitingStarted?.Invoke();
 
         if (!emitSocketRequestEvent)
@@ -790,6 +821,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         {
             data = ToChatEnvelopes(messages),
             username = username,
+            token = authToken,
             model_name = modelName,
             pet_id = petId,
             special = FormatHistoryTime(chatBeginTime ?? DateTime.Now)
@@ -807,6 +839,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         {
             data = keepHistory ? ToChatEnvelopes(BuildRequestMessages(includeFullHistory)) : Array.Empty<ChatEnvelope>(),
             username = username,
+            token = authToken,
             model_name = modelName,
             pet_id = petId,
             special = ""
@@ -857,7 +890,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         value = (value ?? "").Trim().ToLowerInvariant();
         if (string.IsNullOrWhiteSpace(value))
         {
-            value = "gpt";
+            value = "deepseek";
         }
 
         modelName = value;
@@ -906,7 +939,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
 
     public void SetGeminiModelEnabled(bool enabled)
     {
-        SetModelName(enabled ? "gemini" : "gpt");
+        SetModelName(enabled ? "gemini" : "deepseek");
     }
 
     private void CacheController()
@@ -1169,7 +1202,29 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
             return;
         }
 
+        role = ResolveChatLogRole(role);
         chatLog.AddMessage(role, text);
+    }
+
+    private string ResolveChatLogRole(string role)
+    {
+        if (string.Equals(role, "user", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(role, "superpai", StringComparison.OrdinalIgnoreCase))
+        {
+            return GetUserChatLogLabel();
+        }
+
+        return string.IsNullOrWhiteSpace(role) ? "model" : role;
+    }
+
+    private string GetUserChatLogLabel()
+    {
+        if (!string.IsNullOrWhiteSpace(username))
+        {
+            return username.Trim();
+        }
+
+        return string.IsNullOrWhiteSpace(userHistoryLabel) ? "user" : userHistoryLabel.Trim();
     }
 
     private void RebuildHistory()
@@ -1559,6 +1614,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         return JsonUtility.ToJson(new HistoryServerPayload
         {
             username = username,
+            token = authToken,
             model_name = modelName,
             pet_id = petId,
             special = "",
@@ -1584,10 +1640,369 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         if (serverConfig != null && serverConfig.IsLoaded)
         {
             serverUrl = NormalizeServerUrl(serverConfig.SocketServerUrl, serverUrl);
+            Log("Server config path: " + serverConfig.ResolvedConfigPath + ", auth url: " + serverUrl);
+            ApplyServerAuthConfig();
         }
         else
         {
             serverUrl = NormalizeServerUrl(serverUrl, "http://127.0.0.1:5000");
+        }
+    }
+
+    private System.Collections.IEnumerator EnsureAppAuthReady()
+    {
+        yield return EnsureHistoryServerConfigLoaded();
+        if (serverConfig == null || !serverConfig.AppAuthRequired)
+        {
+            yield break;
+        }
+
+        if (serverConfig.HasAppAuth)
+        {
+            var verified = false;
+            yield return VerifySavedAppAuth(result => verified = result);
+            if (verified)
+            {
+                ApplyServerAuthConfig();
+                yield break;
+            }
+
+            serverConfig.ClearAppAuth();
+        }
+
+        appAuthChoiceAnswered = false;
+        ShowAppAuthDialog();
+        while (!appAuthChoiceAnswered)
+        {
+            yield return null;
+        }
+    }
+
+    private void ApplyServerAuthConfig()
+    {
+        if (serverConfig == null || !serverConfig.HasAppAuth)
+        {
+            return;
+        }
+
+        username = serverConfig.AppUsername;
+        authToken = serverConfig.AppAuthToken;
+        userHistoryLabel = username;
+        CacheController();
+        if (socketClient != null)
+        {
+            socketClient.SetUserAuth(username, authToken);
+        }
+    }
+
+    private System.Collections.IEnumerator VerifySavedAppAuth(Action<bool> onCompleted)
+    {
+        if (serverConfig == null || !serverConfig.HasAppAuth)
+        {
+            onCompleted?.Invoke(false);
+            yield break;
+        }
+
+        var payload = JsonUtility.ToJson(new AuthRequestPayload
+        {
+            username = serverConfig.AppUsername,
+            token = serverConfig.AppAuthToken
+        });
+
+        string responseText = "";
+        string error = "";
+        yield return PostAuthJson("/api/verify", payload, (ok, text, err) =>
+        {
+            responseText = text;
+            error = err;
+        });
+
+        if (!string.IsNullOrWhiteSpace(error))
+        {
+            Log("Saved auth verify failed: " + error);
+            onCompleted?.Invoke(false);
+            yield break;
+        }
+
+        try
+        {
+            var response = JsonUtility.FromJson<AuthResponsePayload>(responseText);
+            onCompleted?.Invoke(response != null && response.valid);
+        }
+        catch
+        {
+            onCompleted?.Invoke(false);
+        }
+    }
+
+    private void ShowAppAuthDialog()
+    {
+        if (appAuthDialog != null)
+        {
+            Destroy(appAuthDialog);
+        }
+
+        EnsureEventSystem();
+
+        appAuthDialog = new GameObject("AppAuthDialog");
+        var canvas = appAuthDialog.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.sortingOrder = short.MaxValue;
+        var scaler = appAuthDialog.AddComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1080f, 1920f);
+        scaler.matchWidthOrHeight = 0.5f;
+        appAuthDialog.AddComponent<GraphicRaycaster>();
+
+        var root = appAuthDialog.GetComponent<RectTransform>();
+        root.anchorMin = Vector2.zero;
+        root.anchorMax = Vector2.one;
+        root.offsetMin = Vector2.zero;
+        root.offsetMax = Vector2.zero;
+
+        var blocker = CreateRect("Blocker", root);
+        var blockerImage = blocker.gameObject.AddComponent<Image>();
+        blockerImage.color = new Color(0f, 0f, 0f, 0.66f);
+        blocker.anchorMin = Vector2.zero;
+        blocker.anchorMax = Vector2.one;
+        blocker.offsetMin = Vector2.zero;
+        blocker.offsetMax = Vector2.zero;
+
+        var panel = CreateRect("Panel", root);
+        panel.anchorMin = new Vector2(0.5f, 0.5f);
+        panel.anchorMax = new Vector2(0.5f, 0.5f);
+        panel.pivot = new Vector2(0.5f, 0.5f);
+        panel.sizeDelta = new Vector2(760f, 520f);
+        panel.anchoredPosition = Vector2.zero;
+        var panelImage = panel.gameObject.AddComponent<Image>();
+        panelImage.color = new Color(0.12f, 0.13f, 0.15f, 0.98f);
+
+        AddText(panel, "\u767b\u5f55 ATRI \u8d26\u53f7", 36, new Vector2(0f, 185f), new Vector2(660f, 58f), TextAnchor.MiddleCenter);
+        AddText(panel, "\u7528\u4e8e\u9694\u79bb AI \u8bb0\u5fc6\u548c\u8bed\u97f3\u8bf7\u6c42", 23, new Vector2(0f, 135f), new Vector2(660f, 42f), TextAnchor.MiddleCenter);
+
+        appAuthUsernameInput = AddInputField(panel, "\u7528\u6237\u540d", new Vector2(0f, 55f), false);
+        appAuthPasswordInput = AddInputField(panel, "\u5bc6\u7801", new Vector2(0f, -35f), true);
+        if (serverConfig != null && !string.IsNullOrWhiteSpace(serverConfig.AppUsername))
+        {
+            appAuthUsernameInput.text = serverConfig.AppUsername;
+        }
+
+        appAuthFeedbackText = AddText(panel, "", 22, new Vector2(0f, -105f), new Vector2(650f, 38f), TextAnchor.MiddleCenter);
+        appAuthFeedbackText.color = new Color(1f, 0.82f, 0.35f, 1f);
+
+        appAuthLoginButton = AddChoiceButton(panel, "\u767b\u5f55", new Vector2(-170f, -180f), () => StartAppAuthRequest(false));
+        appAuthRegisterButton = AddChoiceButton(panel, "\u6ce8\u518c", new Vector2(170f, -180f), () => StartAppAuthRequest(true));
+    }
+
+    private InputField AddInputField(RectTransform parent, string placeholder, Vector2 position, bool password)
+    {
+        var rect = CreateRect("InputField", parent);
+        rect.sizeDelta = new Vector2(600f, 64f);
+        rect.anchoredPosition = position;
+
+        var image = rect.gameObject.AddComponent<Image>();
+        image.color = new Color(0.95f, 0.96f, 0.98f, 1f);
+
+        var input = rect.gameObject.AddComponent<InputField>();
+        input.targetGraphic = image;
+        input.contentType = password ? InputField.ContentType.Password : InputField.ContentType.Standard;
+        input.lineType = InputField.LineType.SingleLine;
+
+        var textRect = CreateRect("Text", rect);
+        textRect.anchorMin = Vector2.zero;
+        textRect.anchorMax = Vector2.one;
+        textRect.offsetMin = new Vector2(18f, 4f);
+        textRect.offsetMax = new Vector2(-18f, -4f);
+        var text = textRect.gameObject.AddComponent<Text>();
+        text.font = GetBuiltinUiFont();
+        text.fontSize = 25;
+        text.alignment = TextAnchor.MiddleLeft;
+        text.color = Color.black;
+        text.horizontalOverflow = HorizontalWrapMode.Overflow;
+        text.verticalOverflow = VerticalWrapMode.Truncate;
+        input.textComponent = text;
+
+        var placeholderRect = CreateRect("Placeholder", rect);
+        placeholderRect.anchorMin = Vector2.zero;
+        placeholderRect.anchorMax = Vector2.one;
+        placeholderRect.offsetMin = new Vector2(18f, 4f);
+        placeholderRect.offsetMax = new Vector2(-18f, -4f);
+        var placeholderText = placeholderRect.gameObject.AddComponent<Text>();
+        placeholderText.font = GetBuiltinUiFont();
+        placeholderText.fontSize = 25;
+        placeholderText.alignment = TextAnchor.MiddleLeft;
+        placeholderText.color = new Color(0f, 0f, 0f, 0.45f);
+        placeholderText.text = placeholder;
+        input.placeholder = placeholderText;
+
+        return input;
+    }
+
+    private void StartAppAuthRequest(bool register)
+    {
+        if (appAuthRequestInProgress)
+        {
+            return;
+        }
+
+        StartCoroutine(AppAuthRequestRoutine(register));
+    }
+
+    private System.Collections.IEnumerator AppAuthRequestRoutine(bool register)
+    {
+        var name = appAuthUsernameInput != null ? appAuthUsernameInput.text.Trim() : "";
+        var password = appAuthPasswordInput != null ? appAuthPasswordInput.text : "";
+        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(password))
+        {
+            SetAppAuthFeedback("\u8bf7\u8f93\u5165\u7528\u6237\u540d\u548c\u5bc6\u7801");
+            yield break;
+        }
+
+        appAuthRequestInProgress = true;
+        SetAppAuthButtonsInteractable(false);
+        SetAppAuthFeedback(register ? "\u6b63\u5728\u6ce8\u518c..." : "\u6b63\u5728\u767b\u5f55...");
+
+        var payload = JsonUtility.ToJson(new AuthRequestPayload
+        {
+            username = name,
+            password = password
+        });
+
+        string responseText = "";
+        string error = "";
+        yield return PostAuthJson(register ? "/api/register" : "/api/login", payload, (ok, text, err) =>
+        {
+            responseText = text;
+            error = err;
+        });
+
+        appAuthRequestInProgress = false;
+        SetAppAuthButtonsInteractable(true);
+
+        if (!string.IsNullOrWhiteSpace(error))
+        {
+            SetAppAuthFeedback(error);
+            yield break;
+        }
+
+        AuthResponsePayload response = null;
+        try
+        {
+            response = JsonUtility.FromJson<AuthResponsePayload>(responseText);
+        }
+        catch
+        {
+            SetAppAuthFeedback("\u670d\u52a1\u5668\u54cd\u5e94\u65e0\u6cd5\u89e3\u6790");
+            yield break;
+        }
+
+        if (response == null || string.IsNullOrWhiteSpace(response.username) || string.IsNullOrWhiteSpace(response.token))
+        {
+            SetAppAuthFeedback(string.IsNullOrWhiteSpace(response?.error) ? "\u767b\u5f55\u54cd\u5e94\u7f3a\u5c11 token" : response.error);
+            yield break;
+        }
+
+        serverConfig.SetAppAuth(response.username, response.token);
+        ApplyServerAuthConfig();
+        if (appAuthDialog != null)
+        {
+            Destroy(appAuthDialog);
+            appAuthDialog = null;
+        }
+
+        appAuthChoiceAnswered = true;
+        Log("App auth completed for user: " + response.username);
+    }
+
+    private System.Collections.IEnumerator PostAuthJson(string endpoint, string payload, Action<bool, string, string> onCompleted)
+    {
+        var url = NormalizeServerUrl(serverUrl, "http://127.0.0.1:5000") + endpoint;
+        using (var request = new UnityWebRequest(url, "POST"))
+        {
+            var body = Encoding.UTF8.GetBytes(payload ?? "{}");
+            request.uploadHandler = new UploadHandlerRaw(body);
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+            request.timeout = Mathf.CeilToInt(GetHistoryRequestTimeoutSeconds());
+            UnityWebRequestAsyncOperation operation;
+            try
+            {
+                operation = request.SendWebRequest();
+            }
+            catch (InvalidOperationException exc)
+            {
+                onCompleted?.Invoke(false, "", FormatAuthRequestException(url, exc));
+                yield break;
+            }
+
+            yield return operation;
+
+            var text = request.downloadHandler != null ? request.downloadHandler.text : "";
+            if (request.result == UnityWebRequest.Result.Success)
+            {
+                onCompleted?.Invoke(true, text, "");
+                yield break;
+            }
+
+            var message = TryReadAuthError(text);
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                message = request.error;
+            }
+
+            onCompleted?.Invoke(false, text, message);
+        }
+    }
+
+    private static string TryReadAuthError(string responseText)
+    {
+        if (string.IsNullOrWhiteSpace(responseText))
+        {
+            return "";
+        }
+
+        try
+        {
+            var payload = JsonUtility.FromJson<AuthResponsePayload>(responseText);
+            return payload?.error ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private static string FormatAuthRequestException(string url, Exception exc)
+    {
+        var message = exc != null ? exc.Message : "";
+        if (!string.IsNullOrWhiteSpace(message) &&
+            message.IndexOf("Insecure connection not allowed", StringComparison.OrdinalIgnoreCase) >= 0 &&
+            url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        {
+            return "当前 APK 禁止 HTTP 请求。请用本项目重新打包，或把服务器地址改成 HTTPS：" + url;
+        }
+
+        return string.IsNullOrWhiteSpace(message) ? "认证请求失败" : message;
+    }
+
+    private void SetAppAuthButtonsInteractable(bool interactable)
+    {
+        if (appAuthLoginButton != null)
+        {
+            appAuthLoginButton.interactable = interactable;
+        }
+
+        if (appAuthRegisterButton != null)
+        {
+            appAuthRegisterButton.interactable = interactable;
+        }
+    }
+
+    private void SetAppAuthFeedback(string message)
+    {
+        if (appAuthFeedbackText != null)
+        {
+            appAuthFeedbackText.text = message ?? "";
         }
     }
 
@@ -1692,7 +2107,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         return obj.AddComponent<RectTransform>();
     }
 
-    private static void AddText(RectTransform parent, string text, int fontSize, Vector2 position, Vector2 size, TextAnchor alignment)
+    private static Text AddText(RectTransform parent, string text, int fontSize, Vector2 position, Vector2 size, TextAnchor alignment)
     {
         var rect = CreateRect("Text", parent);
         rect.sizeDelta = size;
@@ -1705,9 +2120,10 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         label.color = Color.white;
         label.horizontalOverflow = HorizontalWrapMode.Wrap;
         label.verticalOverflow = VerticalWrapMode.Overflow;
+        return label;
     }
 
-    private static void AddChoiceButton(RectTransform parent, string text, Vector2 position, UnityEngine.Events.UnityAction action)
+    private static Button AddChoiceButton(RectTransform parent, string text, Vector2 position, UnityEngine.Events.UnityAction action)
     {
         var rect = CreateRect("ChoiceButton", parent);
         rect.sizeDelta = new Vector2(240f, 68f);
@@ -1721,6 +2137,7 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
         button.onClick.AddListener(action);
 
         AddText(rect, text, 26, Vector2.zero, rect.sizeDelta, TextAnchor.MiddleCenter);
+        return button;
     }
 
     private static Font GetBuiltinUiFont()
@@ -1802,7 +2219,19 @@ public sealed class DesktopPetChatBridge : MonoBehaviour
             ? folder
             : DesktopPetResourcePath.GetWritableModelPath(folder);
 
-        return Path.Combine(baseFolder, fileName);
+        return Path.Combine(baseFolder, GetSafeLocalUserFolderName(), fileName);
+    }
+
+    private string GetSafeLocalUserFolderName()
+    {
+        var value = string.IsNullOrWhiteSpace(username) ? "guest" : username.Trim();
+        foreach (var invalid in Path.GetInvalidFileNameChars())
+        {
+            value = value.Replace(invalid, '_');
+        }
+
+        value = Path.GetFileName(value);
+        return string.IsNullOrWhiteSpace(value) ? "guest" : value;
     }
 
     private static bool TryReadDialogueHistoryResponse(string response, out string text, out string error)

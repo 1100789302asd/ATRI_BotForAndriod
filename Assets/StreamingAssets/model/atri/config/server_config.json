@@ -1,8 +1,11 @@
 {
-    "socketServerUrl": "http://superpai.nat400.top",
+    "socketServerUrl": "http://p7eab6cf.natappfree.cc",
     "neteaseApiBaseUrl": "https://ncm-api.prod.gbclstudio.cn",
     "neteaseCellphone": "",
     "neteaseCountryCode": "86",
+    "appAuthRequired": true,
+    "appUsername": "",
+    "appAuthToken": "",
     "memoryStorageMode": "cloud",
     "memoryStorageSelected": false,
     "localMemoryFolder": "记忆",

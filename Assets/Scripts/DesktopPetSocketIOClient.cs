@@ -20,6 +20,7 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     {
         public VoiceProduceData data;
         public string username;
+        public string token;
         public string model_name;
         public string pet_id;
         public string special;
@@ -47,6 +48,7 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     {
         public SpeechRecognitionData data;
         public string username;
+        public string token;
         public string model_name;
         public string pet_id;
         public string special;
@@ -83,8 +85,9 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     [Header("Voice Synthesis")]
     [SerializeField] private DesktopPetMigratedController petController;
     [SerializeField] private string username = "";
+    [SerializeField] private string authToken = "";
     [SerializeField] private string petId = "";
-    [SerializeField] private string modelName = "gpt";
+    [SerializeField] private string modelName = "deepseek";
     [SerializeField] private string voiceProduceEventName = "voice_produce";
     [SerializeField] private string refAudioSuffix = ".wav";
     [SerializeField] private string textLanguage = "ja";
@@ -242,8 +245,15 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
     public void SetModelName(string value)
     {
         value = (value ?? "").Trim().ToLowerInvariant();
-        modelName = string.IsNullOrWhiteSpace(value) ? "gpt" : value;
+        modelName = string.IsNullOrWhiteSpace(value) ? "deepseek" : value;
         Log("AI model switched to: " + modelName);
+    }
+
+    public void SetUserAuth(string value, string token)
+    {
+        username = string.IsNullOrWhiteSpace(value) ? username : value.Trim();
+        authToken = token ?? "";
+        Log("AI user switched to: " + username);
     }
 
     public void UseGptModel()
@@ -263,7 +273,7 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
 
     public void SetGeminiModelEnabled(bool enabled)
     {
-        SetModelName(enabled ? "gemini" : "gpt");
+        SetModelName(enabled ? "gemini" : "deepseek");
     }
 
     public void Disconnect()
@@ -544,6 +554,7 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
         var payload = new VoiceProduceSocketPayload
         {
             username = username,
+            token = authToken,
             model_name = modelName,
             pet_id = petId,
             special = "",
@@ -607,6 +618,7 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
         var payload = new SpeechRecognitionSocketPayload
         {
             username = username,
+            token = authToken,
             model_name = modelName,
             pet_id = petId,
             special = "",
@@ -933,6 +945,10 @@ public sealed class DesktopPetSocketIOClient : MonoBehaviour
         if (serverConfig != null && serverConfig.IsLoaded)
         {
             serverUrl = NormalizeServerUrl(serverConfig.SocketServerUrl, serverUrl);
+            if (serverConfig.HasAppAuth)
+            {
+                SetUserAuth(serverConfig.AppUsername, serverConfig.AppAuthToken);
+            }
         }
     }
 
@@ -1473,6 +1489,9 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
         public string neteaseApiBaseUrl = "http://127.0.0.1:3000";
         public string neteaseCellphone = "";
         public string neteaseCountryCode = "86";
+        public bool appAuthRequired = true;
+        public string appUsername = "";
+        public string appAuthToken = "";
         public string memoryStorageMode = "cloud";
         public bool memoryStorageSelected;
         public string localMemoryFolder = "\u8bb0\u5fc6";
@@ -1480,11 +1499,23 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
         public string localSummaryHistoryFile = "summary_history.txt";
     }
 
+    [Serializable]
+    private sealed class RuntimeState
+    {
+        public string neteaseCellphone = "";
+        public string neteaseCountryCode = "86";
+        public string appUsername = "";
+        public string appAuthToken = "";
+        public string memoryStorageMode = "cloud";
+        public bool memoryStorageSelected;
+    }
+
     [SerializeField] private string configPath = "config/server_config.json";
-    [SerializeField] private bool createMissingConfigFile = true;
+    [SerializeField] private string runtimeStatePath = "config/server_state.json";
 
     private Data data = new Data();
     private string resolvedConfigPath = "";
+    private string resolvedRuntimeStatePath = "";
     private bool isLoaded;
 
     public string SocketServerUrl
@@ -1505,6 +1536,26 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
     public string NeteaseCountryCode
     {
         get { return data.neteaseCountryCode; }
+    }
+
+    public bool AppAuthRequired
+    {
+        get { return data.appAuthRequired; }
+    }
+
+    public string AppUsername
+    {
+        get { return data.appUsername; }
+    }
+
+    public string AppAuthToken
+    {
+        get { return data.appAuthToken; }
+    }
+
+    public bool HasAppAuth
+    {
+        get { return !string.IsNullOrWhiteSpace(data.appUsername) && !string.IsNullOrWhiteSpace(data.appAuthToken); }
     }
 
     public string MemoryStorageMode
@@ -1537,62 +1588,44 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
         get { return isLoaded; }
     }
 
+    public string ResolvedConfigPath
+    {
+        get { return resolvedConfigPath; }
+    }
+
     public IEnumerator LoadRoutine()
     {
-        yield return DesktopPetResourcePath.EnsureWritableModelFile(configPath, createMissingConfigFile, path => resolvedConfigPath = path);
+        resolvedConfigPath = Path.IsPathRooted(configPath)
+            ? configPath
+            : DesktopPetResourcePath.GetStreamingModelPath(configPath);
 
-        if (!string.IsNullOrWhiteSpace(resolvedConfigPath) && File.Exists(resolvedConfigPath))
+        var packagedJson = "";
+        yield return DesktopPetResourcePath.ReadPackagedModelText(configPath, text => packagedJson = text);
+        if (!string.IsNullOrWhiteSpace(packagedJson))
         {
-            var json = File.ReadAllText(resolvedConfigPath, System.Text.Encoding.UTF8);
-            if (!string.IsNullOrWhiteSpace(json))
+            try
             {
-                try
+                var loaded = JsonUtility.FromJson<Data>(packagedJson);
+                if (loaded != null)
                 {
-                    var loaded = JsonUtility.FromJson<Data>(json);
-                    if (loaded != null)
-                    {
-                        data = loaded;
-                    }
+                    data = loaded;
                 }
-                catch (Exception exc)
-                {
-                    Debug.LogWarning("Failed to load server config: " + exc.Message, this);
-                }
+            }
+            catch (Exception exc)
+            {
+                Debug.LogWarning("Failed to load packaged server config: " + exc.Message, this);
             }
         }
-
-        if (UsesLoopbackUrl(data.socketServerUrl) || UsesLoopbackUrl(data.neteaseApiBaseUrl))
+        else
         {
-            var packagedJson = "";
-            yield return DesktopPetResourcePath.ReadPackagedModelText(configPath, text => packagedJson = text);
-            if (!string.IsNullOrWhiteSpace(packagedJson))
-            {
-                try
-                {
-                    var packaged = JsonUtility.FromJson<Data>(packagedJson);
-                    if (packaged != null &&
-                        (!UsesLoopbackUrl(packaged.socketServerUrl) || !UsesLoopbackUrl(packaged.neteaseApiBaseUrl)))
-                    {
-                        if (UsesLoopbackUrl(data.socketServerUrl) && !UsesLoopbackUrl(packaged.socketServerUrl))
-                        {
-                            data.socketServerUrl = packaged.socketServerUrl;
-                        }
-
-                        if (UsesLoopbackUrl(data.neteaseApiBaseUrl) && !UsesLoopbackUrl(packaged.neteaseApiBaseUrl))
-                        {
-                            data.neteaseApiBaseUrl = packaged.neteaseApiBaseUrl;
-                        }
-                    }
-                }
-                catch (Exception exc)
-                {
-                    Debug.LogWarning("Failed to load packaged server config: " + exc.Message, this);
-                }
-            }
+            Debug.LogWarning("Packaged server config was not found: " + resolvedConfigPath, this);
         }
 
         NormalizeData();
+        LoadRuntimeState();
+        NormalizeData();
         isLoaded = true;
+        Debug.Log("Server config loaded from: " + resolvedConfigPath + ", socketServerUrl=" + data.socketServerUrl, this);
         Save();
     }
 
@@ -1628,28 +1661,82 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
         Save();
     }
 
+    public void SetAppAuth(string username, string token)
+    {
+        data.appUsername = (username ?? "").Trim();
+        data.appAuthToken = token ?? "";
+        Save();
+    }
+
+    public void ClearAppAuth()
+    {
+        data.appAuthToken = "";
+        Save();
+    }
+
     public void Save()
     {
-        if (string.IsNullOrWhiteSpace(resolvedConfigPath))
+        if (string.IsNullOrWhiteSpace(resolvedRuntimeStatePath))
         {
-            resolvedConfigPath = Path.IsPathRooted(configPath)
-                ? configPath
-                : DesktopPetResourcePath.GetWritableModelPath(configPath);
+            resolvedRuntimeStatePath = Path.IsPathRooted(runtimeStatePath)
+                ? runtimeStatePath
+                : DesktopPetResourcePath.GetWritableModelPath(runtimeStatePath);
         }
 
         try
         {
-            var directory = Path.GetDirectoryName(resolvedConfigPath);
+            var directory = Path.GetDirectoryName(resolvedRuntimeStatePath);
             if (!string.IsNullOrEmpty(directory))
             {
                 Directory.CreateDirectory(directory);
             }
 
-            File.WriteAllText(resolvedConfigPath, JsonUtility.ToJson(data, true), System.Text.Encoding.UTF8);
+            var state = new RuntimeState
+            {
+                neteaseCellphone = data.neteaseCellphone,
+                neteaseCountryCode = data.neteaseCountryCode,
+                appUsername = data.appUsername,
+                appAuthToken = data.appAuthToken,
+                memoryStorageMode = data.memoryStorageMode,
+                memoryStorageSelected = data.memoryStorageSelected
+            };
+            File.WriteAllText(resolvedRuntimeStatePath, JsonUtility.ToJson(state, true), System.Text.Encoding.UTF8);
         }
         catch (Exception exc)
         {
-            Debug.LogWarning("Failed to save server config: " + exc.Message, this);
+            Debug.LogWarning("Failed to save server state: " + exc.Message, this);
+        }
+    }
+
+    private void LoadRuntimeState()
+    {
+        resolvedRuntimeStatePath = Path.IsPathRooted(runtimeStatePath)
+            ? runtimeStatePath
+            : DesktopPetResourcePath.GetWritableModelPath(runtimeStatePath);
+        if (!File.Exists(resolvedRuntimeStatePath))
+        {
+            return;
+        }
+
+        try
+        {
+            var json = File.ReadAllText(resolvedRuntimeStatePath, System.Text.Encoding.UTF8);
+            var state = JsonUtility.FromJson<RuntimeState>(json);
+            if (state == null)
+            {
+                return;
+            }
+
+            data.neteaseCellphone = state.neteaseCellphone;
+            data.neteaseCountryCode = state.neteaseCountryCode;
+            data.appUsername = state.appUsername;
+            data.appAuthToken = state.appAuthToken;
+            data.memoryStorageMode = state.memoryStorageMode;
+            data.memoryStorageSelected = state.memoryStorageSelected;
+        }
+        catch (Exception exc)
+        {
+            Debug.LogWarning("Failed to load server state: " + exc.Message, this);
         }
     }
 
@@ -1659,6 +1746,8 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
         data.neteaseApiBaseUrl = NormalizeUrl(data.neteaseApiBaseUrl, "http://127.0.0.1:3000");
         data.neteaseCellphone = (data.neteaseCellphone ?? "").Trim();
         data.neteaseCountryCode = string.IsNullOrWhiteSpace(data.neteaseCountryCode) ? "86" : data.neteaseCountryCode.Trim();
+        data.appUsername = (data.appUsername ?? "").Trim();
+        data.appAuthToken = data.appAuthToken ?? "";
         data.memoryStorageMode = NormalizeMemoryStorageMode(data.memoryStorageMode);
         data.localMemoryFolder = string.IsNullOrWhiteSpace(data.localMemoryFolder) ? "\u8bb0\u5fc6" : data.localMemoryFolder.Trim();
         data.localDialogueHistoryFile = string.IsNullOrWhiteSpace(data.localDialogueHistoryFile) ? "dialogue_history.txt" : data.localDialogueHistoryFile.Trim();
@@ -1679,12 +1768,6 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
         }
 
         return value.TrimEnd('/');
-    }
-
-    private static bool UsesLoopbackUrl(string value)
-    {
-        value = (value ?? "").Trim().ToLowerInvariant();
-        return value.Contains("127.0.0.1") || value.Contains("localhost");
     }
 
     private static string NormalizeMemoryStorageMode(string value)
