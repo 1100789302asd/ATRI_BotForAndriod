@@ -1500,6 +1500,17 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
     }
 
     [Serializable]
+    private sealed class ConfigFileData
+    {
+        public string socketServerUrl = "http://127.0.0.1:5000";
+        public string neteaseApiBaseUrl = "http://127.0.0.1:3000";
+        public bool appAuthRequired = true;
+        public string localMemoryFolder = "\u8bb0\u5fc6";
+        public string localDialogueHistoryFile = "dialogue_history.txt";
+        public string localSummaryHistoryFile = "summary_history.txt";
+    }
+
+    [Serializable]
     private sealed class RuntimeState
     {
         public string neteaseCellphone = "";
@@ -1595,30 +1606,27 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
 
     public IEnumerator LoadRoutine()
     {
-        resolvedConfigPath = Path.IsPathRooted(configPath)
-            ? configPath
-            : DesktopPetResourcePath.GetStreamingModelPath(configPath);
+        yield return EnsureWritableConfigFile();
 
-        var packagedJson = "";
-        yield return DesktopPetResourcePath.ReadPackagedModelText(configPath, text => packagedJson = text);
-        if (!string.IsNullOrWhiteSpace(packagedJson))
+        if (!string.IsNullOrWhiteSpace(resolvedConfigPath) && File.Exists(resolvedConfigPath))
         {
             try
             {
-                var loaded = JsonUtility.FromJson<Data>(packagedJson);
+                var json = File.ReadAllText(resolvedConfigPath, System.Text.Encoding.UTF8);
+                var loaded = JsonUtility.FromJson<ConfigFileData>(json);
                 if (loaded != null)
                 {
-                    data = loaded;
+                    ApplyConfigFileData(loaded);
                 }
             }
             catch (Exception exc)
             {
-                Debug.LogWarning("Failed to load packaged server config: " + exc.Message, this);
+                Debug.LogWarning("Failed to load writable server config: " + exc.Message, this);
             }
         }
         else
         {
-            Debug.LogWarning("Packaged server config was not found: " + resolvedConfigPath, this);
+            Debug.LogWarning("Writable server config was not found: " + resolvedConfigPath, this);
         }
 
         NormalizeData();
@@ -1675,6 +1683,85 @@ public sealed class DesktopPetServerConfig : MonoBehaviour
     }
 
     public void Save()
+    {
+        SaveConfigFile();
+        SaveRuntimeState();
+    }
+
+    private IEnumerator EnsureWritableConfigFile()
+    {
+        if (Path.IsPathRooted(configPath))
+        {
+            resolvedConfigPath = configPath;
+            yield break;
+        }
+
+        yield return DesktopPetResourcePath.EnsureWritableModelFile(configPath, false, path => resolvedConfigPath = path);
+        if (!string.IsNullOrWhiteSpace(resolvedConfigPath))
+        {
+            yield break;
+        }
+
+        resolvedConfigPath = DesktopPetResourcePath.GetWritableModelPath(configPath);
+        var directory = Path.GetDirectoryName(resolvedConfigPath);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        SaveConfigFile();
+    }
+
+    private void ApplyConfigFileData(ConfigFileData config)
+    {
+        if (config == null)
+        {
+            return;
+        }
+
+        data.socketServerUrl = config.socketServerUrl;
+        data.neteaseApiBaseUrl = config.neteaseApiBaseUrl;
+        data.appAuthRequired = config.appAuthRequired;
+        data.localMemoryFolder = config.localMemoryFolder;
+        data.localDialogueHistoryFile = config.localDialogueHistoryFile;
+        data.localSummaryHistoryFile = config.localSummaryHistoryFile;
+    }
+
+    private void SaveConfigFile()
+    {
+        if (string.IsNullOrWhiteSpace(resolvedConfigPath))
+        {
+            resolvedConfigPath = Path.IsPathRooted(configPath)
+                ? configPath
+                : DesktopPetResourcePath.GetWritableModelPath(configPath);
+        }
+
+        try
+        {
+            var directory = Path.GetDirectoryName(resolvedConfigPath);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var config = new ConfigFileData
+            {
+                socketServerUrl = data.socketServerUrl,
+                neteaseApiBaseUrl = data.neteaseApiBaseUrl,
+                appAuthRequired = data.appAuthRequired,
+                localMemoryFolder = data.localMemoryFolder,
+                localDialogueHistoryFile = data.localDialogueHistoryFile,
+                localSummaryHistoryFile = data.localSummaryHistoryFile
+            };
+            File.WriteAllText(resolvedConfigPath, JsonUtility.ToJson(config, true), System.Text.Encoding.UTF8);
+        }
+        catch (Exception exc)
+        {
+            Debug.LogWarning("Failed to save server config: " + exc.Message, this);
+        }
+    }
+
+    private void SaveRuntimeState()
     {
         if (string.IsNullOrWhiteSpace(resolvedRuntimeStatePath))
         {
